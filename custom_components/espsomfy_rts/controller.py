@@ -724,7 +724,9 @@ class ESPSomfyAPI:
 
     async def load_shades(self) -> Any | None:
         """Load all the shades from the controller."""
-        async with self._session.get(f"{self._api_url}{API_SHADES}") as resp:
+        async with self._session.get(
+            f"{self._api_url}{API_SHADES}", headers=self._headers
+        ) as resp:
             if resp.status == 200:
                 self._config["shades"] = await resp.json()
                 return self._config["shades"]
@@ -732,7 +734,9 @@ class ESPSomfyAPI:
 
     async def load_groups(self) -> Any | None:
         """Load all the groups from the controller."""
-        async with self._session.get(f"{self._api_url}{API_GROUPS}") as resp:
+        async with self._session.get(
+            f"{self._api_url}{API_GROUPS}", headers=self._headers
+        ) as resp:
             if resp.status == 200:
                 self._config["groups"] = await resp.json()
                 return self._config["groups"]
@@ -832,7 +836,9 @@ class ESPSomfyAPI:
 
     async def put_command(self, command, data):
         """Send a put command to the device."""
-        async with self._session.put(f"{self._api_url}{command}", json=data) as resp:
+        async with self._session.put(
+            f"{self._api_url}{command}", json=data, headers=self._headers
+        ) as resp:
             if resp.status == 200:
                 pass
             else:
@@ -866,7 +872,7 @@ class ESPSomfyAPI:
     async def group_command(self, data):
         """Send commands to ESPSomfyRTS via PUT request."""
         async with self._session.put(
-            f"{self._api_url}{API_GROUPCOMMAND}", json=data
+            f"{self._api_url}{API_GROUPCOMMAND}", json=data, headers=self._headers
         ) as resp:
             if resp.status == 200:
                 pass
@@ -876,7 +882,7 @@ class ESPSomfyAPI:
     async def tilt_command(self, data):
         """Send tilt commands to ESPSomfyRTS via PUT request."""
         async with self._session.put(
-            f"{self._api_url}{API_TILTCOMMAND}", json=data
+            f"{self._api_url}{API_TILTCOMMAND}", json=data, headers=self._headers
         ) as resp:
             if resp.status == 200:
                 pass
