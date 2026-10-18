@@ -17,6 +17,7 @@ from homeassistant.const import (
     SIGNAL_STRENGTH_DECIBELS_MILLIWATT,
     UnitOfDataRate,
     UnitOfInformation,
+    UnitOfTime,
 )
 from homeassistant.core import HomeAssistant
 from homeassistant.helpers.entity import EntityCategory
@@ -222,6 +223,50 @@ async def async_setup_entry(
                         data=data,
                     )
                 )
+            if "loopRate" in mem:
+                new_entities.append(
+                    ESPSomfyDiagSensor(
+                        controller=controller,
+                        cfg=ESPSomfyDiagSensorDescription(
+                            key="loop_rate",
+                            entity_category=EntityCategory.DIAGNOSTIC,
+                            name="Loop Rate",
+                            icon="mdi:speedometer",
+                            min_interval=30,
+                            value_count=15,
+                            unit_of_measurement="passes/s",
+                            state_class=SensorStateClass.MEASUREMENT,
+                            suggested_display_precision=0,
+                            native_value=mem["loopRate"],
+                            events={EVT_MEMSTATUS: "loopRate"},
+                        ),
+                        data=data,
+                    )
+                )
+            if "loopMaxUs" in mem:
+                # Every window's longest pass is kept as is: a median would
+                # smooth away the stall this sensor is there to show.
+                new_entities.append(
+                    ESPSomfyDiagSensor(
+                        controller=controller,
+                        cfg=ESPSomfyDiagSensorDescription(
+                            key="loop_max_time",
+                            entity_category=EntityCategory.DIAGNOSTIC,
+                            device_class=SensorDeviceClass.DURATION,
+                            name="Loop Max Time",
+                            icon="mdi:timer-alert-outline",
+                            min_interval=0,
+                            value_count=1,
+                            unit_of_measurement=UnitOfTime.MICROSECONDS,
+                            suggested_unit_of_measurement=UnitOfTime.MILLISECONDS,
+                            state_class=SensorStateClass.MEASUREMENT,
+                            suggested_display_precision=1,
+                            native_value=mem["loopMaxUs"],
+                            events={EVT_MEMSTATUS: "loopMaxUs"},
+                        ),
+                        data=data,
+                    )
+                )
 
         new_entities.append(
             ESPSomfyDiagSensor(
@@ -258,6 +303,7 @@ class ESPSomfyDiagSensor(ESPSomfyEntity, SensorEntity):
         self._attr_name = cfg.name
         self._attr_device_class = cfg.device_class
         self._attr_native_unit_of_measurement = cfg.unit_of_measurement
+        self._attr_suggested_unit_of_measurement = cfg.suggested_unit_of_measurement
         self._attr_state_class = cfg.state_class
         self.events = cfg.events
         self._attr_icon = cfg.icon
