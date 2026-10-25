@@ -5,14 +5,17 @@ a hello, then a sync of the shade model in frames the client asks for one at a
 time with next, then ops answered by their reply and events as things change.
 Frames use short keys from a schema the device sends first.
 
-Nothing here imports Home Assistant, so tests/proto runs it with plain pytest
-against a fake device that replays what a real one sent.
+The firmware's web UI has the same client in JavaScript (data-src/js:
+ProtoSchema, ProtoModel, ProtoClient). Nothing here imports Home Assistant, so
+tests/proto runs it with plain pytest against a fake device that replays what
+a real one sent.
 """
 
 from __future__ import annotations
 
 import asyncio
 from collections.abc import Callable
+from dataclasses import dataclass
 import json
 import logging
 from typing import Any, NamedTuple
@@ -34,13 +37,18 @@ SYNC_END = 5
 # and feeds.
 ROWS = ("T", "F", "E", "Q")
 
-# /loginContext's type.
+# The security modes, as /loginContext's type gives them.
 SECURITY_NONE = 0
 SECURITY_PIN = 1
 SECURITY_PASSWORD = 2
 
 # Ping interval; aiohttp drops the socket when the pong is half this late.
 HEARTBEAT = 20
+# A message longer than a TCP segment reaches the device in pieces. While it
+# puts one together it refuses another client's long message as busy, without
+# its id, and the client sends it again.
+LONG_MESSAGE = 1400
+MAX_RESENDS = 3
 
 
 class ProtoError(Exception):
@@ -65,7 +73,19 @@ class AuthRequired(Exception):
 
 
 class NoProtocol2(Exception):
-    """The device has no protocol 2 socket: firmware from before it."""
+    """The device has no /ws: firmware from before protocol 2.
+
+    Its web server answers the upgrade with 404, or with a page.
+    """
+
+
+class VersionMismatch(Exception):
+    """The device speaks another protocol version than this client."""
+
+    def __init__(self, version: Any) -> None:
+        """Initialize with the version the device's hello had."""
+        super().__init__(f"the device speaks protocol {version}, not {VERSION}")
+        self.version = version
 
 
 class ConnectionClosed(Exception):
@@ -75,10 +95,23 @@ class ConnectionClosed(Exception):
 class LoginRefused(Exception):
     """/login refused the credentials."""
 
-    def __init__(self, security_type: int) -> None:
-        """Initialize with the device's security type."""
-        super().__init__(f"login refused (security type {security_type})")
-        self.security_type = security_type
+    def __init__(self, security_mode: int) -> None:
+        """Initialize with the device's security mode."""
+        super().__init__(f"login refused (security mode {security_mode})")
+        self.security_mode = security_mode
+
+    @classmethod
+    def from_reply(cls, data: dict) -> LoginRefused:
+        """The refusal /login answered, which names the security mode."""
+        return cls(int(data.get("type", SECURITY_NONE)))
+
+
+class Field(NamedTuple):
+    """A field of the schema: its name, kind and default."""
+
+    name: str
+    kind: str
+    default: Any
 
 
 class Schema:
@@ -93,11 +126,15 @@ class Schema:
         self.hash: str | None = None
         self.types: dict[int, str] = {}
         self.type_numbers: dict[str, int] = {}
-        # key -> (name, kind, default)
-        self.fields: dict[str, tuple[str, str, Any]] = {}
+        self.fields: dict[str, Field] = {}
         self.keys: dict[str, str] = {}
         self.errors: dict[int, str] = {}
         self.feed_numbers: dict[str, int] = {}
+
+    @staticmethod
+    def without_rows(d: dict) -> dict:
+        """A sync frame's payload without the schema's rows: the device's sections."""
+        return {k: v for k, v in d.items() if k not in ROWS}
 
     def add(self, d: dict) -> None:
         """Take the schema's rows from a sync frame; they may span several."""
@@ -105,34 +142,29 @@ class Schema:
             self.types[number] = name
             self.type_numbers[name] = number
         for key, name, kind, default in d.get("F", []):
-            self.fields[key] = (name, kind, default)
+            self.fields[key] = Field(name, kind, default)
             self.keys[name] = key
         for number, name in d.get("E", []):
             self.errors[number] = name
         for number, name in d.get("Q", []):
             self.feed_numbers[name] = number
 
-    @property
-    def empty(self) -> bool:
-        """Whether no field has come yet."""
-        return not self.fields
-
     def default(self, name: str) -> Any:
         """What a field left out of a frame is."""
         key = self.keys.get(name)
         if key is None:
             return None
-        _, kind, default = self.fields[key]
-        match kind:
+        f = self.fields[key]
+        match f.kind:
             case "b":
-                return default != 0
+                return f.default != 0
             case "s":
                 return ""
             case "l":
                 return []
             case "o":
                 return {}
-        return default
+        return f.default
 
     def expand(self, value: Any) -> Any:
         """Short keys to names and 1/0 to booleans, all the way down.
@@ -145,14 +177,13 @@ class Schema:
             return value
         out = {}
         for key, v in value.items():
-            field = self.fields.get(key)
-            if field is None:
+            f = self.fields.get(key)
+            if f is None:
                 out[key] = self.expand(v)
                 continue
-            name, kind, _ = field
-            if kind == "b" and isinstance(v, int):
+            if f.kind == "b" and isinstance(v, int):
                 v = v != 0
-            out[name] = self.expand(v)
+            out[f.name] = self.expand(v)
         return out
 
     def pack(self, value: Any) -> Any:
@@ -185,10 +216,9 @@ class Schema:
 
 
 class _Item(NamedTuple):
-    """A kind of item in the model: where it is kept, its id field and events."""
+    """A kind of item in the model: its id field and the events about it."""
 
     name: str
-    collection: str
     id_field: str
     state: str | None
     removed: str
@@ -199,31 +229,34 @@ class _Item(NamedTuple):
 # that leaves one out means by it. The schema has each field's default, not
 # which items have it. The firmware's data-src/js/model.js has the same lists.
 _SHADE_STATE = (
-    "shadeId", "position", "target", "direction", "myPos", "tiltPosition", "tiltTarget",
-    "tiltDirection", "myTiltPos", "flags", "lastRollingCode",
+    "shadeId", "position", "target", "direction", "myPos", "tiltPosition",
+    "tiltTarget", "tiltDirection", "myTiltPos", "flags", "lastRollingCode",
 )  # fmt: skip
 FIELDS: dict[str, tuple[str, ...]] = {
     "header": (
-        "maxRooms", "maxShades", "maxGroups", "maxGroupedShades", "maxLinkedRemotes",
-        "startingAddress", "bitLength", "proto", "serverId", "hostname", "model",
-        "chipModel", "fw", "connType",
+        "maxRooms", "maxShades", "maxGroups", "maxGroupedShades",
+        "maxLinkedRemotes", "startingAddress", "bitLength", "proto", "serverId",
+        "hostname", "model", "chipModel", "fw", "connType",
     ),
     "room": ("roomId", "name", "sortOrder"),
     "shadeState": _SHADE_STATE,
     "shade": _SHADE_STATE + (
-        "roomId", "name", "remoteAddress", "upTime", "downTime", "tiltTime", "stepSize",
-        "paired", "tiltType", "shadeType", "bitLength", "proto", "flipCommands",
-        "flipPosition", "inGroup", "sunSensor", "light", "simMy", "repeats", "sortOrder",
-        "gpioUp", "gpioDown", "gpioMy", "gpioLLTrigger", "linkedRemotes",
+        "roomId", "name", "remoteAddress", "upTime", "downTime", "tiltTime",
+        "stepSize", "paired", "tiltType", "shadeType", "bitLength", "proto",
+        "flipCommands", "flipPosition", "inGroup", "sunSensor", "light", "simMy",
+        "repeats", "sortOrder", "gpioUp", "gpioDown", "gpioMy", "gpioLLTrigger",
+        "linkedRemotes",
     ),
     "groupState": ("groupId", "flags", "direction"),
     "group": (
-        "groupId", "roomId", "name", "remoteAddress", "lastRollingCode", "bitLength",
-        "proto", "sunSensor", "flipCommands", "flags", "repeats", "sortOrder", "linkedShades",
+        "groupId", "roomId", "name", "remoteAddress", "lastRollingCode",
+        "bitLength", "proto", "sunSensor", "flipCommands", "flags", "repeats",
+        "sortOrder", "linkedShades",
     ),
     "linkedRemote": ("remoteAddress", "lastRollingCode"),
     "memory": (
-        "freeHeap", "maxHeap", "minHeap", "totalHeap", "uptime", "loopRate", "loopMaxUs",
+        "freeHeap", "maxHeap", "minHeap", "totalHeap", "uptime", "loopRate",
+        "loopMaxUs",
     ),
     "wifi": ("ssid", "strength", "channel"),
     "ethernet": ("connected", "speed", "fullDuplex"),
@@ -239,27 +272,42 @@ class Model:
     """
 
     ITEMS = (
-        _Item("room", "rooms", "roomId", None, "roomRemoved", "roomOrder"),
-        _Item("shade", "shades", "shadeId", "shadeState", "shadeRemoved", "shadeOrder"),
-        _Item("group", "groups", "groupId", "groupState", "groupRemoved", "groupOrder"),
+        _Item("room", "roomId", None, "roomRemoved", "roomOrder"),
+        _Item("shade", "shadeId", "shadeState", "shadeRemoved", "shadeOrder"),
+        _Item("group", "groupId", "groupState", "groupRemoved", "groupOrder"),
     )
 
     def __init__(self, schema: Schema) -> None:
         """Initialize an empty model."""
         self.schema = schema
         self.header: dict[str, Any] = {}
-        self.rooms: dict[int, dict] = {}
-        self.shades: dict[int, dict] = {}
-        self.groups: dict[int, dict] = {}
+        # Rooms, shades and groups by id, under their kind's name.
+        self.items: dict[str, dict[int, dict]] = {kind.name: {} for kind in self.ITEMS}
         self.repeaters: list[int] = []
         self.status: dict[str, Any] = {}
+
+    @property
+    def rooms(self) -> dict[int, dict]:
+        """The rooms by id."""
+        return self.items["room"]
+
+    @property
+    def shades(self) -> dict[int, dict]:
+        """The shades by id."""
+        return self.items["shade"]
+
+    @property
+    def groups(self) -> dict[int, dict]:
+        """The groups by id."""
+        return self.items["group"]
 
     def apply_sync(self, d: dict) -> None:
         """Take the sections of a sync frame."""
         if "header" in d:
             self.header = self.schema.fill(dict(d["header"]), FIELDS["header"])
+        # The sync lists each kind under its plural: rooms, shades, groups.
         for kind in self.ITEMS:
-            for item in d.get(kind.collection, []):
+            for item in d.get(f"{kind.name}s", []):
                 self._put(kind, item)
         if "repeaters" in d:
             self.repeaters = list(d["repeaters"])
@@ -274,6 +322,7 @@ class Model:
         False for one that isn't about the model, or that changed nothing.
         """
         for kind in self.ITEMS:
+            items = self.items[kind.name]
             item_id = d.get(kind.id_field, 0)
             if name == kind.name:
                 self._put(kind, d)
@@ -281,9 +330,11 @@ class Model:
             if name == kind.state:
                 return self._merge_state(kind, item_id, d)
             if name == kind.removed:
-                return getattr(self, kind.collection).pop(item_id, None) is not None
+                return items.pop(item_id, None) is not None
             if name == kind.order:
-                self._order(kind, d.get("ids", []))
+                for i, ordered_id in enumerate(d.get("ids", [])):
+                    if ordered_id in items:
+                        items[ordered_id]["sortOrder"] = i
                 return True
         match name:
             case "repeaters":
@@ -303,28 +354,34 @@ class Model:
                 self.schema.fill(dict(r), FIELDS["linkedRemote"])
                 for r in whole["linkedRemotes"]
             ]
-        getattr(self, kind.collection)[whole[kind.id_field]] = whole
+        self.items[kind.name][whole[kind.id_field]] = whole
 
     def _merge_state(self, kind: _Item, item_id: int, d: dict) -> bool:
         """Part of an item: only its state.
 
         A state of an item not synced yet waits for the item.
         """
-        item = getattr(self, kind.collection).get(item_id)
+        item = self.items[kind.name].get(item_id)
         if item is None:
             return False
         item.update(self.schema.fill(dict(d), FIELDS[kind.state]))
         return True
 
-    def _order(self, kind: _Item, ids: list[int]) -> None:
-        items = getattr(self, kind.collection)
-        for i, item_id in enumerate(ids):
-            if item_id in items:
-                items[item_id]["sortOrder"] = i
-
     def _put_status(self, d: dict, names: tuple[str, ...]) -> None:
         for name in names:
             self.status[name] = d[name] if name in d else self.schema.default(name)
+
+
+class _TryAgain(Exception):
+    """The device was busy putting another long message together."""
+
+
+@dataclass
+class _Pending:
+    """An op waiting for its reply."""
+
+    text: str
+    reply: asyncio.Future
 
 
 class ProtoConnection:
@@ -356,7 +413,7 @@ class ProtoConnection:
         self._session = session
         self._op_timeout = op_timeout
         self._ws: aiohttp.ClientWebSocketResponse | None = None
-        self._pending: dict[int, asyncio.Future] = {}
+        self._pending: dict[int, _Pending] = {}
         self._next_id = 1
         self._hello = False
         self._hello_hash: str | None = None
@@ -380,15 +437,26 @@ class ProtoConnection:
         Returns a function that removes it.
         """
         self._listeners.append(cb)
-        return lambda: self._listeners.remove(cb)
+
+        def remove() -> None:
+            if cb in self._listeners:
+                self._listeners.remove(cb)
+
+        return remove
 
     async def connect(self, timeout: float = 15) -> None:
         """Open the socket and take hello and the whole sync.
 
-        Raises AuthRequired when the device wants a token, NoProtocol2 when it
-        has no protocol 2 socket, ConnectionClosed when it closed the socket
-        first (as it does with every slot taken), and aiohttp's or the OS's
-        errors when it can't be reached.
+        Raises:
+        - AuthRequired: the device wants a token, or a good one;
+        - NoProtocol2: the device has no /ws, as before protocol 2;
+        - VersionMismatch: it speaks another protocol version;
+        - ConnectionClosed: it closed the socket first, as it does with every
+          slot taken;
+        - TimeoutError: no whole sync in time, a silent socket included;
+        - aiohttp's or the OS's errors, another refused upgrade among them,
+          when it can't be reached.
+        All but the first three are worth trying again.
         """
         try:
             async with asyncio.timeout(timeout):
@@ -403,22 +471,26 @@ class ProtoConnection:
         except aiohttp.WSServerHandshakeError as err:
             if err.status == 401:
                 raise AuthRequired from err
-            raise NoProtocol2(f"/ws answered {err.status}") from err
+            if err.status in (200, 404):
+                raise NoProtocol2(f"/ws answered {err.status}") from err
+            raise
         except BaseException:
             await self.close()
             raise
 
     async def run(self, receive_timeout: float = 60) -> None:
-        """Read frames until the socket closes.
+        """Read frames until the socket closes, then close it.
 
         The device sends its memory every 30 s, so a minute of silence means
         the link is dead even if TCP hasn't noticed: that raises TimeoutError.
         """
+        if self._ws is None:
+            raise ProtoError("notConnected", "run() before connect()")
         try:
             while await self._receive(receive_timeout):
                 pass
         finally:
-            self._lost()
+            await self.close()
 
     async def close(self) -> None:
         """Close the socket; ops waiting for a reply fail."""
@@ -426,11 +498,12 @@ class ProtoConnection:
         if self._ws is not None:
             await self._ws.close()
 
-    async def op(self, name: str, **fields: Any) -> dict:
+    async def op(self, name: str, /, **fields: Any) -> dict:
         """Send an op by its name with its fields by name.
 
         Returns the reply's fields; raises ProtoError when the device refuses
-        it or no reply comes.
+        it or no reply comes. The op's name is positional, so a field may be
+        called name too.
         """
         if not self.synced or self._ws is None or self._ws.closed:
             raise ProtoError("notConnected", "Not connected to the device")
@@ -446,12 +519,21 @@ class ProtoConnection:
         frame: dict[str, Any] = {"v": VERSION, "t": number, "id": msg_id}
         if d:
             frame["d"] = d
-        reply = asyncio.get_running_loop().create_future()
-        self._pending[msg_id] = reply
+        loop = asyncio.get_running_loop()
+        pending = _Pending(_dumps(frame), loop.create_future())
+        self._pending[msg_id] = pending
         try:
-            await self._ws.send_str(json.dumps(frame, separators=(",", ":")))
             async with asyncio.timeout(self._op_timeout):
-                return await reply
+                for resends in range(MAX_RESENDS + 1):
+                    if resends:
+                        await asyncio.sleep(0.2 * resends)
+                        pending.reply = loop.create_future()
+                    await self._ws.send_str(pending.text)
+                    try:
+                        return await pending.reply
+                    except _TryAgain:
+                        continue
+                raise ProtoError("busy", f"The device stayed busy for {name}")
         except TimeoutError:
             raise ProtoError("timeout", f"No reply to {name}") from None
         finally:
@@ -478,13 +560,10 @@ class ProtoConnection:
             return
         if not isinstance(frame, dict):
             return
-        if not self._hello:
-            # The first frame from a protocol 2 device is always hello.
-            if frame.get("v") != VERSION or frame.get("t") != HELLO:
-                raise NoProtocol2(
-                    f"the first frame wasn't a protocol 2 hello: {text[:80]}"
-                )
-        elif frame.get("v") != VERSION:
+        if frame.get("v") != VERSION:
+            # The first frame is always hello, whose keys never change.
+            if not self._hello:
+                raise VersionMismatch(frame.get("v"))
             _LOGGER.debug("Frame of protocol %s ignored", frame.get("v"))
             return
         d = frame.get("d") or {}
@@ -516,15 +595,13 @@ class ProtoConnection:
 
     async def _sync(self, d: dict) -> None:
         self.schema.add(d)
-        device = {k: v for k, v in d.items() if k not in ROWS}
+        device = Schema.without_rows(d)
         # The schema's rows come first, so a frame with the device's sections
         # has the whole of it.
         if device:
             self._make_readable()
             self.model.apply_sync(self.schema.expand(device))
-        await self._ws.send_str(
-            json.dumps({"v": VERSION, "t": NEXT}, separators=(",", ":"))
-        )
+        await self._ws.send_str(_dumps({"v": VERSION, "t": NEXT}))
 
     def _sync_end(self) -> None:
         self._make_readable()
@@ -558,29 +635,50 @@ class ProtoConnection:
         if not d.get("ok"):
             code = self.schema.errors.get(d.get("code"), "internal")
             err = ProtoError(code, d.get("desc"), d)
-        reply = self._pending.get(msg_id)
-        if reply is None or reply.done():
+        pending = self._pending.get(msg_id)
+        if pending is not None and not pending.reply.done():
             if err is not None:
-                _LOGGER.debug("The device refused a message: %s", err.desc)
+                pending.reply.set_exception(err)
+            else:
+                pending.reply.set_result(d)
             return
-        if err is not None:
-            reply.set_exception(err)
-        else:
-            reply.set_result(d)
+        if err is None:
+            return
+        # A long message the device couldn't take while it put another one
+        # together is refused without its id: the long ones waiting go again.
+        if err.code == "busy" and msg_id is None and self._try_long_again():
+            return
+        _LOGGER.debug("The device refused a message: %s", err.desc)
+
+    def _try_long_again(self) -> bool:
+        waiting = [
+            p
+            for p in self._pending.values()
+            if len(p.text) >= LONG_MESSAGE and not p.reply.done()
+        ]
+        for p in waiting:
+            p.reply.set_exception(_TryAgain())
+        return bool(waiting)
 
     def _lost(self) -> None:
         """The socket has gone: nothing waiting gets its reply."""
         self.synced = False
-        for reply in self._pending.values():
-            if not reply.done():
-                reply.set_exception(ProtoError("closed", "The connection closed"))
+        for pending in self._pending.values():
+            if not pending.reply.done():
+                pending.reply.set_exception(
+                    ProtoError("closed", "The connection closed")
+                )
         self._pending.clear()
+
+
+def _dumps(frame: dict) -> str:
+    return json.dumps(frame, separators=(",", ":"))
 
 
 async def login_context(
     session: aiohttp.ClientSession, host: str, timeout: float = 10
 ) -> dict:
-    """The device's security type and identity, which need no login."""
+    """The device's security mode and identity, which need no login."""
     async with asyncio.timeout(timeout):
         async with session.get(f"http://{host}/loginContext") as resp:
             resp.raise_for_status()
@@ -606,10 +704,13 @@ async def login(
             # The firmware answers a refusal with 401; before protocol 2 it
             # was 200 with success false.
             if resp.status == 401:
-                data = await resp.json(content_type=None)
-                raise LoginRefused(int(data.get("type", 0)))
+                try:
+                    data = await resp.json(content_type=None)
+                except ValueError:
+                    data = {}
+                raise LoginRefused.from_reply(data)
             resp.raise_for_status()
             data = await resp.json(content_type=None)
     if not data.get("success"):
-        raise LoginRefused(int(data.get("type", 0)))
+        raise LoginRefused.from_reply(data)
     return data.get("apiKey", "")

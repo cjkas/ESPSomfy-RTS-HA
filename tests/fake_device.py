@@ -2,7 +2,7 @@
 
 /loginContext and /login, and /ws replaying the hello and sync a real device
 sent (tests/fixtures/proto2). Ops get ok unless a test sets another reply.
-It packs and reads frames with its own table from the recorded schema, not
+It packs and reads frames with its own table from the recorded schema, never
 with the client's code under test.
 """
 
@@ -23,8 +23,12 @@ TYPES = {name: int(number) for number, name in SCHEMA["types"].items()}
 TYPE_NAMES = {number: name for name, number in TYPES.items()}
 KEYS = {f["name"]: key for key, f in SCHEMA["fields"].items()}
 NAMES = {key: f["name"] for key, f in SCHEMA["fields"].items()}
-ERRORS = {name: int(number) for number, name in SCHEMA["errors"].items()}
 ROWS = ("T", "F", "E", "Q")
+
+# The security modes, as /loginContext's type gives them.
+MODE_NONE = 0
+MODE_PIN = 1
+MODE_PASSWORD = 2
 
 TOKEN = "a-token"
 
@@ -62,29 +66,31 @@ def frame(type_name: str, d: dict | None = None, msg_id: int | None = None) -> s
 class FakeDevice:
     """What the tests set and see of the device."""
 
-    def __init__(
-        self,
-        *,
-        security: int = 0,
-        username: str = "",
-        password: str = "",
-        pin: str = "",
-    ) -> None:
-        """Initialize a device in a security mode."""
-        self.security = security
-        self.username = username
-        self.password = password
-        self.pin = pin
+    def __init__(self) -> None:
+        """Initialize a device under None, as a real one is out of the box."""
+        self.security_mode = MODE_NONE
+        self.username = ""
+        self.password = ""
+        self.pin = ""
+        # How /login refuses: "401" as the firmware does now, "200" with
+        # success false as it did before protocol 2, "401 text" with no JSON.
+        self.login_refusal = "401"
         # Old firmware has no /ws: set this to the status it answers instead.
         self.ws_status: int | None = None
+        # The hello sent; None for a socket that opens and says nothing.
+        self.hello: dict | None = HELLO
+        # Close each socket as soon as it opens, as with every slot taken.
+        self.close_at_once = False
         # Frames sent right after hello, before the sync.
         self.early: list[str] = []
         # Op name -> the reply's fields, or None for no reply at all.
         self.replies: dict[str, dict | None] = {}
+        # Op name -> how many times it is refused busy without its id first,
+        # as the device does while it puts another long message together.
+        self.busy_without_id: dict[str, int] = {}
         # (op name, fields by name) as received.
         self.ops: list[tuple[str, dict]] = []
         self.sockets: list[web.WebSocketResponse] = []
-        self.connects = 0
         self.schema_params: list[str | None] = []
 
     def app(self) -> web.Application:
@@ -108,7 +114,7 @@ class FakeDevice:
     async def _login_context(self, request: web.Request) -> web.Response:
         return web.json_response(
             {
-                "type": self.security,
+                "type": self.security_mode,
                 "permissions": 0,
                 "serverId": "A1B2C3",
                 "version": HELLO["d"]["fw"],
@@ -120,33 +126,46 @@ class FakeDevice:
     async def _login(self, request: web.Request) -> web.Response:
         body = await request.json()
         ok = (
-            self.security == 0
-            or (self.security == 1 and body.get("pin") == self.pin)
+            self.security_mode == MODE_NONE
+            or (self.security_mode == MODE_PIN and body.get("pin") == self.pin)
             or (
-                self.security == 2
+                self.security_mode == MODE_PASSWORD
                 and body.get("username") == self.username
                 and body.get("password") == self.password
             )
         )
-        if not ok:
+        if ok:
             return web.json_response(
-                {"type": self.security, "msg": "Invalid credentials", "success": False},
-                status=401,
+                {
+                    "type": self.security_mode,
+                    "apiKey": TOKEN,
+                    "msg": "Success",
+                    "success": True,
+                }
             )
+        if self.login_refusal == "401 text":
+            return web.Response(status=401, text="Unauthorized")
         return web.json_response(
-            {"type": self.security, "apiKey": TOKEN, "msg": "Success", "success": True}
+            {
+                "type": self.security_mode,
+                "msg": "Invalid credentials",
+                "success": False,
+            },
+            status=401 if self.login_refusal == "401" else 200,
         )
 
     async def _ws(self, request: web.Request) -> web.StreamResponse:
         if self.ws_status is not None:
             return web.Response(status=self.ws_status)
-        if self.security != 0 and request.query.get("apikey") != TOKEN:
+        if self.security_mode != MODE_NONE and request.query.get("apikey") != TOKEN:
             return web.Response(status=401)
-        self.connects += 1
         known = request.query.get("schema")
         self.schema_params.append(known)
         ws = web.WebSocketResponse()
         await ws.prepare(request)
+        if self.close_at_once:
+            await ws.close()
+            return ws
         self.sockets.append(ws)
         try:
             await self._serve(ws, skip_schema=known == HELLO["d"]["sh"])
@@ -154,18 +173,27 @@ class FakeDevice:
             self.sockets.remove(ws)
         return ws
 
-    async def _serve(self, ws: web.WebSocketResponse, skip_schema: bool) -> None:
-        await ws.send_str(json.dumps(HELLO))
-        for text in self.early:
-            await ws.send_str(text)
-        sync = []
+    def _sync_frames(self, skip_schema: bool) -> list[str]:
+        """The recorded sync, without the schema's rows for a client that has it."""
+        frames = []
         for f in SYNC:
             if skip_schema and f["t"] == TYPES["sync"]:
                 d = {k: v for k, v in f["d"].items() if k not in ROWS}
                 if not d:
                     continue
                 f = {**f, "d": d}
-            sync.append(json.dumps(f))
+            frames.append(json.dumps(f))
+        return frames
+
+    async def _serve(self, ws: web.WebSocketResponse, skip_schema: bool) -> None:
+        if self.hello is None:
+            async for _ in ws:
+                pass
+            return
+        await ws.send_str(json.dumps(self.hello))
+        for text in self.early:
+            await ws.send_str(text)
+        sync = self._sync_frames(skip_schema)
         await ws.send_str(sync.pop(0))
         async for msg in ws:
             if msg.type != WSMsgType.TEXT:
@@ -175,6 +203,10 @@ class FakeDevice:
             if name == "next":
                 if sync:
                     await ws.send_str(sync.pop(0))
+                continue
+            if self.busy_without_id.get(name, 0) > 0:
+                self.busy_without_id[name] -= 1
+                await ws.send_str(frame("reply", {"code": 5, "desc": "busy"}))
                 continue
             self.ops.append((name, unpack(f.get("d", {}))))
             if "id" not in f:

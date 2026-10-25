@@ -1,21 +1,25 @@
 """The shade model from the recorded sync, and the events that change it."""
 
-from fake_device import SYNC
-from proto import ROWS, Model
+from __future__ import annotations
+
+from fake_device import SYNC as RECORDED_SYNC
+from proto import SYNC, Model, Schema
 import pytest
 
 
 @pytest.fixture
 def model(recorded_schema) -> Model:
+    """A model filled from the recorded sync."""
     m = Model(recorded_schema)
-    for f in SYNC:
-        device = {k: v for k, v in f.get("d", {}).items() if k not in ROWS}
-        if f["t"] == 4 and device:
+    for f in RECORDED_SYNC:
+        device = Schema.without_rows(f.get("d", {}))
+        if f["t"] == SYNC and device:
             m.apply_sync(recorded_schema.expand(device))
     return m
 
 
 def test_the_sync_fills_in_what_it_leaves_out(model):
+    """Items get every field, at its default where the device left it out."""
     assert len(model.shades) == 10
     assert len(model.groups) == 2
     assert len(model.rooms) == 2
@@ -36,6 +40,7 @@ def test_the_sync_fills_in_what_it_leaves_out(model):
 
 
 def test_the_sync_status_is_memory_and_the_link_in_use(model):
+    """The status holds the memory and, on WiFi, the WiFi fields only."""
     assert model.status["freeHeap"] == 148760
     assert model.status["loopMaxUs"] == 106737
     assert model.status["strength"] == -52
@@ -44,6 +49,7 @@ def test_the_sync_status_is_memory_and_the_link_in_use(model):
 
 
 def test_a_shade_state_is_merged_with_its_defaults(model):
+    """A state left out of shadeState is at its default; the rest is kept."""
     assert model.apply_event("shadeState", {"shadeId": 1, "target": 50, "direction": 1})
     shade = model.shades[1]
     # Left out: back at 0.
@@ -55,11 +61,13 @@ def test_a_shade_state_is_merged_with_its_defaults(model):
 
 
 def test_a_state_of_a_shade_not_synced_yet_changes_nothing(model):
+    """A state waits for its shade."""
     assert not model.apply_event("shadeState", {"shadeId": 99, "position": 5})
     assert 99 not in model.shades
 
 
 def test_a_whole_shade_replaces_the_one_before(model):
+    """The shade event carries the whole shade."""
     assert model.apply_event("shade", {"shadeId": 1, "name": "Office", "shadeType": 3})
     shade = model.shades[1]
     assert shade["name"] == "Office"
@@ -69,6 +77,7 @@ def test_a_whole_shade_replaces_the_one_before(model):
 
 
 def test_removed_items_go(model):
+    """Removing an id the model doesn't have changes nothing."""
     assert model.apply_event("shadeRemoved", {"shadeId": 3})
     assert 3 not in model.shades
     assert not model.apply_event("shadeRemoved", {"shadeId": 3})
@@ -77,12 +86,14 @@ def test_removed_items_go(model):
 
 
 def test_an_order_sets_the_sort_order(model):
+    """An order event numbers the items in its order."""
     assert model.apply_event("groupOrder", {"ids": [2, 1]})
     assert model.groups[2]["sortOrder"] == 0
     assert model.groups[1]["sortOrder"] == 1
 
 
 def test_group_state_memory_and_wifi(model):
+    """Group states merge; memory and WiFi go to the status."""
     assert model.apply_event("groupState", {"groupId": 2, "flags": 0x20})
     assert model.groups[2]["flags"] == 0x20
     assert model.groups[2]["name"] == "name 69"
@@ -94,4 +105,5 @@ def test_group_state_memory_and_wifi(model):
 
 
 def test_an_event_about_something_else_is_not_the_models(model):
+    """A frame from the frames feed isn't about the model."""
     assert not model.apply_event("frame", {"remoteAddress": 1})

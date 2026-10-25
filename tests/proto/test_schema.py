@@ -1,10 +1,14 @@
 """The schema against the one a device sent (tests/fixtures/proto2)."""
 
+from __future__ import annotations
+
 from fake_device import SCHEMA
+from proto import Schema
 import pytest
 
 
 def test_the_schema_is_collected_from_every_sync_frame_it_spans(recorded_schema):
+    """The schema's rows span two sync frames; all of them are taken."""
     s = recorded_schema
     assert len(s.types) == len(SCHEMA["types"])
     assert len(s.fields) == len(SCHEMA["fields"])
@@ -16,6 +20,7 @@ def test_the_schema_is_collected_from_every_sync_frame_it_spans(recorded_schema)
 
 
 def test_short_keys_become_names_and_1_0_booleans_all_the_way_down(recorded_schema):
+    """expand() turns keys into names, also inside lists and objects."""
     s = recorded_schema
     shade = s.expand({"s": 3, "n": "Office", "i": 1, "fp": 0, "lk": [{"a": 5, "c": 9}]})
     assert shade == {
@@ -30,6 +35,7 @@ def test_short_keys_become_names_and_1_0_booleans_all_the_way_down(recorded_sche
 
 
 def test_names_become_short_keys_for_an_op(recorded_schema):
+    """pack() turns names into keys and booleans into 1/0."""
     s = recorded_schema
     assert s.pack({"shadeId": 3, "command": "Up", "paired": True, "sunny": False}) == {
         "s": 3,
@@ -45,6 +51,7 @@ def test_names_become_short_keys_for_an_op(recorded_schema):
 
 
 def test_a_field_left_out_is_its_default(recorded_schema):
+    """Each kind of field has its default."""
     s = recorded_schema
     assert s.default("myPos") == -1
     assert s.default("stepSize") == 100
@@ -58,3 +65,9 @@ def test_a_field_left_out_is_its_default(recorded_schema):
         "position": 0,
         "myPos": -1,
     }
+
+
+def test_a_sync_frame_without_its_rows_is_the_devices_sections():
+    """without_rows() leaves the header, items and status."""
+    d = {"T": [], "F": [], "h": {"fw": "x"}, "S": []}
+    assert Schema.without_rows(d) == {"h": {"fw": "x"}, "S": []}
