@@ -31,6 +31,17 @@ async def until(condition: Callable[[], object], timeout: float = 2) -> None:
             await asyncio.sleep(0.01)
 
 
+@pytest.fixture(autouse=True)
+def allow_localhost(request):
+    """Let the tests reach the fake device under Home Assistant's harness.
+
+    When it is installed, as for a run of all of tests/, its pytest-socket
+    blocks sockets in every test.
+    """
+    if request.config.pluginmanager.has_plugin("socket"):
+        request.getfixturevalue("socket_enabled")
+
+
 @pytest.fixture
 def recorded_schema() -> Schema:
     """The schema from the recorded sync."""

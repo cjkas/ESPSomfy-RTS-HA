@@ -79,6 +79,9 @@ class FakeDevice:
         self.username = ""
         self.password = ""
         self.pin = ""
+        # /loginContext's permissions: 1 is "Secure Config Only", where old
+        # firmware takes commands without the token.
+        self.permissions = 0
         # What /login gives and the socket and /backup take.
         self.token = TOKEN
         # How /login refuses: "401" as the firmware does now, "200" with
@@ -138,7 +141,7 @@ class FakeDevice:
         return web.json_response(
             {
                 "type": self.security_mode,
-                "permissions": 0,
+                "permissions": self.permissions,
                 "serverId": SERVER_ID,
                 "version": HELLO["d"]["fw"],
                 "model": "ESPSomfyRTS",

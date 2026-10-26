@@ -44,6 +44,7 @@ from .const import (
     API_DISCOVERY,
     API_GROUPCOMMAND,
     API_GROUPS,
+    API_REBOOT,
     API_SETPOSITIONS,
     API_SETSENSOR,
     API_SHADECOMMAND,
@@ -66,6 +67,19 @@ from .const import (
 from .proto import ProtoConnection
 
 _LOGGER = logging.getLogger(__name__)
+
+# The op that does what each HTTP route did, with the same fields.
+OPS = {
+    API_SHADECOMMAND: "shadeCommand",
+    API_GROUPCOMMAND: "groupCommand",
+    API_TILTCOMMAND: "tiltCommand",
+    API_SETPOSITIONS: "setPositions",
+    API_SETSENSOR: "setSensor",
+    API_REBOOT: "reboot",
+}
+# /loginContext's permissions bit of "Secure Config Only": old firmware then
+# takes commands without the token.
+PERMISSION_CONFIG_ONLY = 0x01
 
 # Bounds the TCP connect plus the HTTP upgrade so a stalled attempt is retried.
 CONNECT_TIMEOUT = 15
@@ -159,6 +173,11 @@ class Listener:
             except _StopListening:
                 self._set_connected(False)
                 return
+            except Exception as err:
+                # A bug shouldn't end the loop: the entities would show the
+                # device connected while nothing reads the socket.
+                _LOGGER.exception("Unexpected error on %s", self.url)
+                reason = err
             finally:
                 if self._stopping:
                     self.connected = False
@@ -285,33 +304,38 @@ class ProtoListener(Listener):
             _LOGGER.warning("%s refused the login", self.api.get_host())
             self.onauthfailed()
             raise _StopListening from None
-        except proto.NoProtocol2:
-            # The firmware went back to a version before protocol 2: setting
-            # up again picks the HTTP API.
-            _LOGGER.warning("%s no longer speaks protocol 2", self.api.get_host())
+        except (proto.NoProtocol2, proto.VersionMismatch) as err:
+            # The firmware changed to one that doesn't speak protocol 2:
+            # setting up again picks the HTTP API, or reports the mismatch.
+            _LOGGER.warning("%s: %s", self.api.get_host(), err)
             self.api.reload()
             raise _StopListening from None
-        except (proto.VersionMismatch, proto.ConnectionClosed, ValueError) as err:
+        except (proto.ConnectionClosed, ValueError) as err:
             # ValueError: /login answered something that isn't JSON.
             return err
-        self.api.attach(conn)
         model = conn.model
 
         def on_event(name: str, d: dict) -> None:
-            data = compat.event(model, name, d)
-            if data is not None:
-                self.onpacket(data)
+            try:
+                data = compat.event(model, name, d)
+                if data is not None:
+                    self.onpacket(data)
+            except Exception:
+                # One event an entity can't take shouldn't drop the socket.
+                _LOGGER.exception("Error handling %s from %s", name, self.url)
 
         remove = conn.add_listener(on_event)
         try:
+            self.api.attach(conn)
             self._opened()
             # Events missed while the socket was down are in the sync.
-            for data in compat.state_events(conn.model):
+            for data in compat.state_events(model):
                 self.onpacket(data)
             await conn.run(RECEIVE_TIMEOUT)
         finally:
             remove()
             self.api.detach(conn)
+            await conn.close()
         return "closed by device"
 
 
@@ -681,8 +705,13 @@ class ESPSomfyAPI:
     def set_host(self, host) -> None:
         """Set the host for the integration."""
         self._host = host
-        self._sock_url = f"ws://{self._host}:8080"
-        self._api_url = f"http://{self._host}:8081"
+        # The old socket and HTTP API have their own ports; a port given with
+        # the address is port 80's.
+        name, sep, port = host.rpartition(":")
+        if not (sep and port.isdigit() and ":" not in name):
+            name = host
+        self._sock_url = f"ws://{name}:8080"
+        self._api_url = f"http://{name}:8081"
         self._config_url = f"http://{self._host}"
 
     def get_host(self):
@@ -735,7 +764,9 @@ class ESPSomfyAPI:
             if dev := get_device(
                 self.hass, f"espsomfy_{self.server_id}", self._config_entry_id
             ):
-                dr.async_get(self.hass).async_update_device(dev.id, sw_version=new_ver)
+                dr.async_get(self.hass).async_update_device(
+                    dev.id, sw_version=new_ver
+                )
         self._config["version"] = new_ver
         v = version_parse(new_ver)
         if (
@@ -790,8 +821,12 @@ class ESPSomfyAPI:
             await self._setup_legacy()
             return None
         self.protocol = 2
-        self.attach(conn)
-        await self._forward_setups()
+        try:
+            self.attach(conn)
+            await self._forward_setups()
+        except BaseException:
+            await conn.close()
+            raise
         return conn
 
     async def _setup_legacy(self) -> None:
@@ -804,6 +839,10 @@ class ESPSomfyAPI:
         try:
             await self._log_in()
         except proto.LoginRefused as err:
+            if await self._token_needed():
+                raise ConfigEntryAuthFailed(
+                    f"{self._host} refused the login: {err}"
+                ) from err
             _LOGGER.warning("%s: %s", self._host, err)
         except (TimeoutError, aiohttp.ClientError, ValueError) as err:
             _LOGGER.debug("%s: no login: %s", self._host, err)
@@ -812,6 +851,14 @@ class ESPSomfyAPI:
             raise ConfigEntryNotReady(
                 f"Could not find ESPSomfy RTS device with address {self._api_url}"
             )
+
+    async def _token_needed(self) -> bool:
+        """Whether old firmware needs the token for commands, not only config."""
+        try:
+            context = await proto.login_context(self._session, self._host)
+        except (TimeoutError, aiohttp.ClientError, ValueError):
+            return False
+        return not int(context.get("permissions", 0)) & PERMISSION_CONFIG_ONLY
 
     async def _log_in(self) -> None:
         """A token from /login with the stored credentials."""
@@ -1087,7 +1134,10 @@ class ESPSomfyAPI:
         a refusal is raised.
         """
         if self.protocol == 2:
-            await self._op(command.lstrip("/"), data or {})
+            op = OPS.get(command)
+            if op is None:
+                raise HomeAssistantError(f"Protocol 2 has no op for {command}")
+            await self._op(op, data or {})
             return
         async with self._session.put(
             f"{self._api_url}{command}", json=data, headers=self._headers

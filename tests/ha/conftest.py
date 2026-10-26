@@ -6,8 +6,6 @@ the fake one the protocol 2 tests use, served on localhost.
 
 from __future__ import annotations
 
-import asyncio
-from collections.abc import Callable
 from pathlib import Path
 import sys
 
@@ -17,22 +15,15 @@ import pytest
 ROOT = Path(__file__).parents[2]
 sys.path.insert(0, str(ROOT))
 sys.path.insert(0, str(ROOT / "tests"))
+sys.path.insert(0, str(ROOT / "tests" / "ha"))
 
-from fake_device import SERVER_ID, FakeDevice  # noqa: E402
+from fake_device import FakeDevice  # noqa: E402
+from harness import UNIQUE_ID  # noqa: E402
 from pytest_homeassistant_custom_component.common import (  # noqa: E402
     MockConfigEntry,
 )
 
 from custom_components.espsomfy_rts.const import DOMAIN  # noqa: E402
-
-UNIQUE_ID = f"espsomfy_{SERVER_ID}"
-
-
-async def until(condition: Callable[[], object], timeout: float = 5) -> None:
-    """Wait for condition() to hold, as the integration takes events in its own time."""
-    async with asyncio.timeout(timeout):
-        while not condition():
-            await asyncio.sleep(0.02)
 
 
 @pytest.fixture(autouse=True)

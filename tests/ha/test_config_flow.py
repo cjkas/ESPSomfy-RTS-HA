@@ -5,7 +5,7 @@ from __future__ import annotations
 from ipaddress import ip_address
 import socket
 
-from conftest import UNIQUE_ID
+from harness import UNIQUE_ID
 from fake_device import HOSTNAME, MODE_PASSWORD, MODE_PIN, SERVER_ID
 import pytest
 from pytest_homeassistant_custom_component.common import MockConfigEntry

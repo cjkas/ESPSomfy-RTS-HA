@@ -79,6 +79,11 @@ def _host_valid(host: str) -> bool:
     return port.isdigit() and int(port) < 65536 and is_host_valid(name)
 
 
+def _title(device: dict[str, Any], host: str) -> str:
+    """The device's hostname, which names its entry."""
+    return device.get("hostname") or host
+
+
 def _login_error(mode: int) -> str:
     return "invalid_pin" if mode == proto.SECURITY_PIN else "invalid_password"
 
@@ -226,9 +231,7 @@ class ConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
             step_id="credentials",
             data_schema=_credentials_schema(mode, user_input),
             errors=errors,
-            description_placeholders={
-                CONF_NAME: self.device.get("hostname") or self.host
-            },
+            description_placeholders={CONF_NAME: _title(self.device, self.host)},
         )
 
     async def _read_device(self, host: str) -> None:
@@ -243,7 +246,7 @@ class ConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                 entry, data={**entry.data, **creds}
             )
         return self.async_create_entry(
-            title=self.device.get("hostname") or self.host,
+            title=_title(self.device, self.host),
             data={CONF_HOST: self.host, **creds},
         )
 
@@ -289,7 +292,7 @@ class ESPSomfyOptionsFlowHandler(config_entries.OptionsFlow):
                     errors["base"] = _login_error(mode)
                 else:
                     data = {CONF_HOST: host, **creds}
-                    title = device.get("hostname") or host
+                    title = _title(device, host)
                     # Update config entry with data from user input
                     self.hass.config_entries.async_update_entry(
                         self._config_entry, title=title, data=data
