@@ -51,7 +51,11 @@ class ESPSomfyRTSUpdateEntity(ESPSomfyEntity, UpdateEntity):
         self._fw_progress = 100
         self._app_progress = 100
         self._total_progress = 100
-        if controller.check_for_update:
+        if controller.api.protocol == 2:
+            # The firmware is updated from its own page (the firmware's
+            # ADR 0007): this shows the version installed.
+            self._attr_supported_features = UpdateEntityFeature(0)
+        elif controller.check_for_update:
             self._attr_supported_features = (
                 UpdateEntityFeature.INSTALL
                 | UpdateEntityFeature.SPECIFIC_VERSION

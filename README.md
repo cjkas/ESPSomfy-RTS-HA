@@ -65,6 +65,14 @@ The data payload for the event includes:
 uv run --no-project --python 3.13 --with-requirements requirements_test.txt -- pytest tests/proto
 ```
 
+The integration picks protocol 2 when the device answers on `ws://host/ws`, and keeps the HTTP API on port 8081 and the old socket on 8080 for firmware before it, whose `/ws` answers 404. On protocol 2, `compat.py` hands the entities the model and events in the shape the old API gave them, so they read the same fields either way.
+
+`tests/ha` tests the integration in Home Assistant's test harness ([pytest-homeassistant-custom-component](https://github.com/MatthewFlamm/pytest-homeassistant-custom-component)), against the same fake device. Home Assistant runs on Linux and macOS only:
+
+```sh
+uv run --no-project --python 3.13 --with-requirements requirements_test_ha.txt -- pytest tests/ha
+```
+
 
 
 

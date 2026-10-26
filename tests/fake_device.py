@@ -1,9 +1,13 @@
 """A fake ESPSomfy RTS device: an aiohttp app that answers as the firmware does.
 
-/loginContext and /login, and /ws replaying the hello and sync a real device
-sent (tests/fixtures/proto2). Ops get ok unless a test sets another reply.
-It packs and reads frames with its own table from the recorded schema, never
-with the client's code under test.
+/loginContext and /login, /backup, and /ws replaying the hello and sync a
+real device sent (tests/fixtures/proto2). Ops get ok unless a test sets
+another reply. It packs and reads frames with its own table from the recorded
+schema, never with the client's code under test.
+
+With legacy set it is firmware before protocol 2 instead: /ws answers 404,
+and /discovery, the command routes and an old socket at /legacy answer as the
+HTTP API on port 8081 and the socket on 8080 did.
 """
 
 from __future__ import annotations
@@ -31,6 +35,9 @@ MODE_PIN = 1
 MODE_PASSWORD = 2
 
 TOKEN = "a-token"
+# As in the recorded sync's header, which the device's other routes agree with.
+SERVER_ID = "serverId 2"
+HOSTNAME = "hostname 3"
 
 
 def pack(value: Any) -> Any:
@@ -72,6 +79,11 @@ class FakeDevice:
         self.username = ""
         self.password = ""
         self.pin = ""
+        # /loginContext's permissions: 1 is "Secure Config Only", where old
+        # firmware takes commands without the token.
+        self.permissions = 0
+        # What /login gives and the socket and /backup take.
+        self.token = TOKEN
         # How /login refuses: "401" as the firmware does now, "200" with
         # success false as it did before protocol 2, "401 text" with no JSON.
         self.login_refusal = "401"
@@ -92,6 +104,11 @@ class FakeDevice:
         self.ops: list[tuple[str, dict]] = []
         self.sockets: list[web.WebSocketResponse] = []
         self.schema_params: list[str | None] = []
+        # The apikey header of each /backup.
+        self.backups: list[str | None] = []
+        self.legacy = False
+        # (route, body) of each command to the HTTP API.
+        self.puts: list[tuple[str, dict | None]] = []
 
     def app(self) -> web.Application:
         """The aiohttp app to serve."""
@@ -99,12 +116,21 @@ class FakeDevice:
         app.router.add_get("/loginContext", self._login_context)
         app.router.add_put("/login", self._login)
         app.router.add_get("/ws", self._ws)
+        app.router.add_get("/backup", self._backup)
+        app.router.add_get("/discovery", self._discovery)
+        app.router.add_put("/{route}", self._put)
+        app.router.add_get("/legacy", self._legacy_ws)
         return app
 
     async def send(self, type_name: str, **fields: Any) -> None:
         """Send an event to every client."""
         for ws in self.sockets:
             await ws.send_str(frame(type_name, fields))
+
+    async def send_legacy(self, event: str, **fields: Any) -> None:
+        """Send an event on the old socket, framed as it was."""
+        for ws in self.sockets:
+            await ws.send_str(f"42[{event},{json.dumps(fields)}]")
 
     async def close_sockets(self) -> None:
         """Close every client's socket, as a security save or reboot does."""
@@ -115,11 +141,11 @@ class FakeDevice:
         return web.json_response(
             {
                 "type": self.security_mode,
-                "permissions": 0,
-                "serverId": "A1B2C3",
+                "permissions": self.permissions,
+                "serverId": SERVER_ID,
                 "version": HELLO["d"]["fw"],
                 "model": "ESPSomfyRTS",
-                "hostname": "espsomfy",
+                "hostname": HOSTNAME,
             }
         )
 
@@ -138,7 +164,7 @@ class FakeDevice:
             return web.json_response(
                 {
                     "type": self.security_mode,
-                    "apiKey": TOKEN,
+                    "apiKey": self.token,
                     "msg": "Success",
                     "success": True,
                 }
@@ -154,10 +180,64 @@ class FakeDevice:
             status=401 if self.login_refusal == "401" else 200,
         )
 
+    def _authorized(self, token: str | None) -> bool:
+        return self.security_mode == MODE_NONE or token == self.token
+
+    async def _backup(self, request: web.Request) -> web.Response:
+        token = request.headers.get("apikey")
+        self.backups.append(token)
+        if not self._authorized(token):
+            return web.Response(status=401, text="Unauthorized API Key")
+        return web.Response(text='{"version": 23, "shades": []}')
+
+    async def _discovery(self, request: web.Request) -> web.Response:
+        if not self.legacy:
+            return web.Response(status=404)
+        shades = [
+            {
+                "shadeId": 1,
+                "name": "Living room",
+                "shadeType": 0,
+                "position": 30,
+                "flipPosition": False,
+                "tiltType": 0,
+            }
+        ]
+        return web.json_response(
+            {
+                "serverId": SERVER_ID,
+                "model": "ESPSomfyRTS",
+                "hostname": HOSTNAME,
+                "version": "v2.4.7",
+                "connType": "Wifi",
+                "rooms": [],
+                "shades": shades,
+                "groups": [],
+            }
+        )
+
+    async def _put(self, request: web.Request) -> web.Response:
+        body = await request.json() if request.can_read_body else None
+        self.puts.append((request.match_info["route"], body))
+        return web.json_response({"ok": True})
+
+    async def _legacy_ws(self, request: web.Request) -> web.StreamResponse:
+        ws = web.WebSocketResponse()
+        await ws.prepare(request)
+        self.sockets.append(ws)
+        try:
+            async for _ in ws:
+                pass
+        finally:
+            self.sockets.remove(ws)
+        return ws
+
     async def _ws(self, request: web.Request) -> web.StreamResponse:
+        if self.legacy:
+            return web.Response(status=404)
         if self.ws_status is not None:
             return web.Response(status=self.ws_status)
-        if self.security_mode != MODE_NONE and request.query.get("apikey") != TOKEN:
+        if not self._authorized(request.query.get("apikey")):
             return web.Response(status=401)
         known = request.query.get("schema")
         self.schema_params.append(known)

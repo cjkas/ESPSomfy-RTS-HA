@@ -238,7 +238,7 @@ async def test_login_context_gives_the_security_mode(session, host, device):
     device.security_mode = MODE_PIN
     context = await login_context(session, host)
     assert context["type"] == MODE_PIN
-    assert context["serverId"] == "A1B2C3"
+    assert context["serverId"] == "serverId 2"
 
 
 async def test_login_gives_the_token_or_refuses(session, host, device):

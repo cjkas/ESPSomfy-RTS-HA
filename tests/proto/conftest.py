@@ -21,7 +21,7 @@ sys.path.insert(0, str(ROOT / "custom_components" / "espsomfy_rts"))
 sys.path.insert(0, str(ROOT / "tests"))
 
 from fake_device import HELLO, SYNC, FakeDevice  # noqa: E402
-from proto import ProtoConnection, Schema  # noqa: E402
+from proto import SYNC as SYNC_TYPE, Model, ProtoConnection, Schema  # noqa: E402
 
 
 async def until(condition: Callable[[], object], timeout: float = 2) -> None:
@@ -29,6 +29,17 @@ async def until(condition: Callable[[], object], timeout: float = 2) -> None:
     async with asyncio.timeout(timeout):
         while not condition():
             await asyncio.sleep(0.01)
+
+
+@pytest.fixture(autouse=True)
+def allow_localhost(request):
+    """Let the tests reach the fake device under Home Assistant's harness.
+
+    When it is installed, as for a run of all of tests/, its pytest-socket
+    blocks sockets in every test.
+    """
+    if request.config.pluginmanager.has_plugin("socket"):
+        request.getfixturevalue("socket_enabled")
 
 
 @pytest.fixture
@@ -39,6 +50,17 @@ def recorded_schema() -> Schema:
         schema.add(f.get("d", {}))
     schema.hash = HELLO["d"]["sh"]
     return schema
+
+
+@pytest.fixture
+def model(recorded_schema) -> Model:
+    """A model filled from the recorded sync."""
+    m = Model(recorded_schema)
+    for f in SYNC:
+        device = Schema.without_rows(f.get("d", {}))
+        if f["t"] == SYNC_TYPE and device:
+            m.apply_sync(recorded_schema.expand(device))
+    return m
 
 
 @pytest.fixture
