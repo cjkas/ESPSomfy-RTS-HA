@@ -1,0 +1,15 @@
+name: Tests
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  proto:
+    runs-on: "ubuntu-latest"
+    steps:
+      - uses: "actions/checkout@v4"
+      - uses: "astral-sh/setup-uv@v6"
+      - name: Protocol 2 tests
+        run: uv run --no-project --python 3.13 --with-requirements requirements_test.txt -- pytest tests/proto

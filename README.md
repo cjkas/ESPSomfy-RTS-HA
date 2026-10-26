@@ -58,6 +58,13 @@ The data payload for the event includes:
 
 ![image](https://github.com/rstrouse/ESPSomfy-RTS-HA/assets/47839015/2fbf4ad8-86b4-4d4e-ac8e-ce04ba4adeeb)
 
+# Development
+`custom_components/espsomfy_rts/proto.py` speaks the firmware's socket protocol 2 ([PROTOCOL.md](https://github.com/cjkas/ESPSomfy-RTS/blob/main/docs/PROTOCOL.md)). It imports nothing from Home Assistant, and `tests/proto` tests it against a fake device that replays what a real one sent (`tests/fixtures/proto2`):
+
+```sh
+uv run --no-project --python 3.13 --with-requirements requirements_test.txt -- pytest tests/proto
+```
+
 
 
 

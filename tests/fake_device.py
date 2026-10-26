@@ -1,0 +1,216 @@
+"""A fake ESPSomfy RTS device: an aiohttp app that answers as the firmware does.
+
+/loginContext and /login, and /ws replaying the hello and sync a real device
+sent (tests/fixtures/proto2). Ops get ok unless a test sets another reply.
+It packs and reads frames with its own table from the recorded schema, never
+with the client's code under test.
+"""
+
+from __future__ import annotations
+
+import json
+from pathlib import Path
+from typing import Any
+
+from aiohttp import WSMsgType, web
+
+FIXTURES = Path(__file__).parent / "fixtures" / "proto2"
+HELLO = json.loads((FIXTURES / "hello.json").read_text())
+SYNC = json.loads((FIXTURES / "sync.json").read_text())
+SCHEMA = json.loads((FIXTURES / "schema.json").read_text())
+
+TYPES = {name: int(number) for number, name in SCHEMA["types"].items()}
+TYPE_NAMES = {number: name for name, number in TYPES.items()}
+KEYS = {f["name"]: key for key, f in SCHEMA["fields"].items()}
+NAMES = {key: f["name"] for key, f in SCHEMA["fields"].items()}
+ROWS = ("T", "F", "E", "Q")
+
+# The security modes, as /loginContext's type gives them.
+MODE_NONE = 0
+MODE_PIN = 1
+MODE_PASSWORD = 2
+
+TOKEN = "a-token"
+
+
+def pack(value: Any) -> Any:
+    """Names to short keys and booleans to 1/0, as the firmware writes them."""
+    if isinstance(value, list):
+        return [pack(v) for v in value]
+    if isinstance(value, bool):
+        return int(value)
+    if isinstance(value, dict):
+        return {KEYS[name]: pack(v) for name, v in value.items()}
+    return value
+
+
+def unpack(value: Any) -> Any:
+    """Short keys to names; values as sent."""
+    if isinstance(value, list):
+        return [unpack(v) for v in value]
+    if isinstance(value, dict):
+        return {NAMES.get(key, key): unpack(v) for key, v in value.items()}
+    return value
+
+
+def frame(type_name: str, d: dict | None = None, msg_id: int | None = None) -> str:
+    """A frame from the device, packed."""
+    out: dict[str, Any] = {"v": 2, "t": TYPES[type_name]}
+    if msg_id is not None:
+        out["id"] = msg_id
+    if d:
+        out["d"] = pack(d)
+    return json.dumps(out)
+
+
+class FakeDevice:
+    """What the tests set and see of the device."""
+
+    def __init__(self) -> None:
+        """Initialize a device under None, as a real one is out of the box."""
+        self.security_mode = MODE_NONE
+        self.username = ""
+        self.password = ""
+        self.pin = ""
+        # How /login refuses: "401" as the firmware does now, "200" with
+        # success false as it did before protocol 2, "401 text" with no JSON.
+        self.login_refusal = "401"
+        # Old firmware has no /ws: set this to the status it answers instead.
+        self.ws_status: int | None = None
+        # The hello sent; None for a socket that opens and says nothing.
+        self.hello: dict | None = HELLO
+        # Close each socket as soon as it opens, as with every slot taken.
+        self.close_at_once = False
+        # Frames sent right after hello, before the sync.
+        self.early: list[str] = []
+        # Op name -> the reply's fields, or None for no reply at all.
+        self.replies: dict[str, dict | None] = {}
+        # Op name -> how many times it is refused busy without its id first,
+        # as the device does while it puts another long message together.
+        self.busy_without_id: dict[str, int] = {}
+        # (op name, fields by name) as received.
+        self.ops: list[tuple[str, dict]] = []
+        self.sockets: list[web.WebSocketResponse] = []
+        self.schema_params: list[str | None] = []
+
+    def app(self) -> web.Application:
+        """The aiohttp app to serve."""
+        app = web.Application()
+        app.router.add_get("/loginContext", self._login_context)
+        app.router.add_put("/login", self._login)
+        app.router.add_get("/ws", self._ws)
+        return app
+
+    async def send(self, type_name: str, **fields: Any) -> None:
+        """Send an event to every client."""
+        for ws in self.sockets:
+            await ws.send_str(frame(type_name, fields))
+
+    async def close_sockets(self) -> None:
+        """Close every client's socket, as a security save or reboot does."""
+        for ws in list(self.sockets):
+            await ws.close()
+
+    async def _login_context(self, request: web.Request) -> web.Response:
+        return web.json_response(
+            {
+                "type": self.security_mode,
+                "permissions": 0,
+                "serverId": "A1B2C3",
+                "version": HELLO["d"]["fw"],
+                "model": "ESPSomfyRTS",
+                "hostname": "espsomfy",
+            }
+        )
+
+    async def _login(self, request: web.Request) -> web.Response:
+        body = await request.json()
+        ok = (
+            self.security_mode == MODE_NONE
+            or (self.security_mode == MODE_PIN and body.get("pin") == self.pin)
+            or (
+                self.security_mode == MODE_PASSWORD
+                and body.get("username") == self.username
+                and body.get("password") == self.password
+            )
+        )
+        if ok:
+            return web.json_response(
+                {
+                    "type": self.security_mode,
+                    "apiKey": TOKEN,
+                    "msg": "Success",
+                    "success": True,
+                }
+            )
+        if self.login_refusal == "401 text":
+            return web.Response(status=401, text="Unauthorized")
+        return web.json_response(
+            {
+                "type": self.security_mode,
+                "msg": "Invalid credentials",
+                "success": False,
+            },
+            status=401 if self.login_refusal == "401" else 200,
+        )
+
+    async def _ws(self, request: web.Request) -> web.StreamResponse:
+        if self.ws_status is not None:
+            return web.Response(status=self.ws_status)
+        if self.security_mode != MODE_NONE and request.query.get("apikey") != TOKEN:
+            return web.Response(status=401)
+        known = request.query.get("schema")
+        self.schema_params.append(known)
+        ws = web.WebSocketResponse()
+        await ws.prepare(request)
+        if self.close_at_once:
+            await ws.close()
+            return ws
+        self.sockets.append(ws)
+        try:
+            await self._serve(ws, skip_schema=known == HELLO["d"]["sh"])
+        finally:
+            self.sockets.remove(ws)
+        return ws
+
+    def _sync_frames(self, skip_schema: bool) -> list[str]:
+        """The recorded sync, without the schema's rows for a client that has it."""
+        frames = []
+        for f in SYNC:
+            if skip_schema and f["t"] == TYPES["sync"]:
+                d = {k: v for k, v in f["d"].items() if k not in ROWS}
+                if not d:
+                    continue
+                f = {**f, "d": d}
+            frames.append(json.dumps(f))
+        return frames
+
+    async def _serve(self, ws: web.WebSocketResponse, skip_schema: bool) -> None:
+        if self.hello is None:
+            async for _ in ws:
+                pass
+            return
+        await ws.send_str(json.dumps(self.hello))
+        for text in self.early:
+            await ws.send_str(text)
+        sync = self._sync_frames(skip_schema)
+        await ws.send_str(sync.pop(0))
+        async for msg in ws:
+            if msg.type != WSMsgType.TEXT:
+                continue
+            f = json.loads(msg.data)
+            name = TYPE_NAMES.get(f["t"])
+            if name == "next":
+                if sync:
+                    await ws.send_str(sync.pop(0))
+                continue
+            if self.busy_without_id.get(name, 0) > 0:
+                self.busy_without_id[name] -= 1
+                await ws.send_str(frame("reply", {"code": 5, "desc": "busy"}))
+                continue
+            self.ops.append((name, unpack(f.get("d", {}))))
+            if "id" not in f:
+                continue
+            reply = self.replies.get(name, {"ok": True})
+            if reply is not None:
+                await ws.send_str(frame("reply", reply, f["id"]))
