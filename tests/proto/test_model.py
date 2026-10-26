@@ -2,21 +2,6 @@
 
 from __future__ import annotations
 
-from fake_device import SYNC as RECORDED_SYNC
-from proto import SYNC, Model, Schema
-import pytest
-
-
-@pytest.fixture
-def model(recorded_schema) -> Model:
-    """A model filled from the recorded sync."""
-    m = Model(recorded_schema)
-    for f in RECORDED_SYNC:
-        device = Schema.without_rows(f.get("d", {}))
-        if f["t"] == SYNC and device:
-            m.apply_sync(recorded_schema.expand(device))
-    return m
-
 
 def test_the_sync_fills_in_what_it_leaves_out(model):
     """Items get every field, at its default where the device left it out."""

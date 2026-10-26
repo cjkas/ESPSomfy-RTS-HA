@@ -16,9 +16,20 @@ import aiohttp
 from packaging.version import parse as version_parse
 
 from homeassistant.components.cover import CoverDeviceClass, CoverEntityFeature
-from homeassistant.const import CONF_HOST, CONF_PIN, CONF_USERNAME, Platform
+from homeassistant.const import (
+    CONF_HOST,
+    CONF_PASSWORD,
+    CONF_PIN,
+    CONF_USERNAME,
+    Platform,
+)
 from homeassistant.core import HomeAssistant
-from homeassistant.exceptions import HomeAssistantError
+from homeassistant.exceptions import (
+    ConfigEntryAuthFailed,
+    ConfigEntryError,
+    ConfigEntryNotReady,
+    HomeAssistantError,
+)
 from homeassistant.helpers import (
     aiohttp_client,
     device_registry as dr,
@@ -28,11 +39,11 @@ from homeassistant.helpers.aiohttp_client import async_get_clientsession
 from homeassistant.helpers.update_coordinator import DataUpdateCoordinator
 from homeassistant.util import dt as dt_util
 
+from . import compat, proto
 from .const import (
     API_DISCOVERY,
     API_GROUPCOMMAND,
     API_GROUPS,
-    API_LOGIN,
     API_SETPOSITIONS,
     API_SETSENSOR,
     API_SHADECOMMAND,
@@ -52,6 +63,7 @@ from .const import (
     EVT_WIFISTRENGTH,
     PLATFORMS,
 )
+from .proto import ProtoConnection
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -81,11 +93,17 @@ def get_device(
     return registry.async_get_device(identifiers={(DOMAIN, unique_id)})
 
 
-class SocketListener:
-    """A listener of sockets."""
+class _StopListening(Exception):
+    """The listener gives up: connecting again can't help."""
 
-    def __init__(self, hass: HomeAssistant, url: str, onpacket, onopen, onclose) -> None:
-        """Initialize a new socket listener."""
+
+class Listener:
+    """Keeps a socket to the device open, connecting again when it closes."""
+
+    def __init__(
+        self, hass: HomeAssistant, url: str, onpacket, onopen, onclose
+    ) -> None:
+        """Initialize a new listener."""
         self.hass = hass
         self.url = url
         self.onpacket = onpacket
@@ -94,13 +112,9 @@ class SocketListener:
         # None until the first attempt, so a device that is down at startup
         # still reports disconnected.
         self.connected: bool | None = None
-        self.filter = None
         self._task: asyncio.Task | None = None
         self._stopping = False
-
-    def set_filter(self, arr: Any) -> None:
-        """Filter for the events."""
-        self.filter = arr.copy()
+        self._opened_at: float | None = None
 
     def start(self) -> None:
         """Start the connect/reconnect loop."""
@@ -119,43 +133,37 @@ class SocketListener:
             await self._task
         self._task = None
 
+    async def _serve(self) -> Any:
+        """Connect, then read until the socket closes; returns why it did.
+
+        Calls _opened() once the socket is open.
+        """
+        raise NotImplementedError
+
+    def _opened(self) -> None:
+        self._opened_at = time.monotonic()
+        _LOGGER.info("Connected to %s", self.url)
+        self._set_connected(True)
+
     async def _run(self) -> None:
         """Keep the socket connected until stopped."""
-        session = async_get_clientsession(self.hass)
         backoff = 1
         while True:
-            opened_at = None
-            reason: Any = "closed by device"
+            self._opened_at = None
             try:
-                async with asyncio.timeout(CONNECT_TIMEOUT):
-                    ws = await session.ws_connect(
-                        self.url, heartbeat=HEARTBEAT, autoping=True
-                    )
-                async with ws:
-                    opened_at = time.monotonic()
-                    _LOGGER.info("Connected to %s", self.url)
-                    self._set_connected(True)
-                    while True:
-                        msg = await ws.receive(timeout=RECEIVE_TIMEOUT)
-                        if msg.type == aiohttp.WSMsgType.TEXT:
-                            self._handle_message(msg.data)
-                        elif msg.type == aiohttp.WSMsgType.ERROR:
-                            reason = ws.exception() or "socket error"
-                            break
-                        elif msg.type in (
-                            aiohttp.WSMsgType.CLOSE,
-                            aiohttp.WSMsgType.CLOSING,
-                            aiohttp.WSMsgType.CLOSED,
-                        ):
-                            break
+                reason = await self._serve()
             except TimeoutError:
-                reason = "timed out" if opened_at else "connect timed out"
+                reason = "timed out" if self._opened_at else "connect timed out"
             except (aiohttp.ClientError, OSError) as err:
                 reason = err
+            except _StopListening:
+                self._set_connected(False)
+                return
             finally:
                 if self._stopping:
                     self.connected = False
 
+            opened_at = self._opened_at
             if opened_at is not None:
                 uptime = time.monotonic() - opened_at
                 if uptime > STABLE_AFTER:
@@ -188,6 +196,40 @@ class SocketListener:
         else:
             self.onclose()
 
+
+class SocketListener(Listener):
+    """The old socket on port 8080, of firmware before protocol 2."""
+
+    def __init__(
+        self, hass: HomeAssistant, url: str, onpacket, onopen, onclose
+    ) -> None:
+        """Initialize a new socket listener."""
+        super().__init__(hass, url, onpacket, onopen, onclose)
+        self.filter = None
+
+    def set_filter(self, arr: Any) -> None:
+        """Filter for the events."""
+        self.filter = arr.copy()
+
+    async def _serve(self) -> Any:
+        session = async_get_clientsession(self.hass)
+        async with asyncio.timeout(CONNECT_TIMEOUT):
+            ws = await session.ws_connect(self.url, heartbeat=HEARTBEAT, autoping=True)
+        async with ws:
+            self._opened()
+            while True:
+                msg = await ws.receive(timeout=RECEIVE_TIMEOUT)
+                if msg.type == aiohttp.WSMsgType.TEXT:
+                    self._handle_message(msg.data)
+                elif msg.type == aiohttp.WSMsgType.ERROR:
+                    return ws.exception() or "socket error"
+                elif msg.type in (
+                    aiohttp.WSMsgType.CLOSE,
+                    aiohttp.WSMsgType.CLOSING,
+                    aiohttp.WSMsgType.CLOSED,
+                ):
+                    return "closed by device"
+
     def _handle_message(self, message: str) -> None:
         """Process the incoming message."""
         try:
@@ -201,6 +243,76 @@ class SocketListener:
                     self.onpacket(data)
         except ValueError:
             _LOGGER.debug("Bad socket payload %r", message, exc_info=True)
+
+
+class ProtoListener(Listener):
+    """Protocol 2's socket at ws://host/ws.
+
+    Each connection ends with the socket: the next is a new one, which logs in
+    again when the device refuses the token. The events reach onpacket in the
+    old socket's shape (compat.py).
+    """
+
+    def __init__(
+        self,
+        hass: HomeAssistant,
+        api: ESPSomfyAPI,
+        conn: ProtoConnection | None,
+        onpacket,
+        onopen,
+        onclose,
+        onauthfailed,
+    ) -> None:
+        """Initialize, with the connection setup opened when there is one."""
+        super().__init__(hass, f"ws://{api.get_host()}/ws", onpacket, onopen, onclose)
+        self.api = api
+        self.onauthfailed = onauthfailed
+        self._conn = conn
+
+    async def stop(self) -> None:
+        """Stop the loop and close the socket, the one setup opened too."""
+        await super().stop()
+        if self._conn is not None:
+            await self._conn.close()
+            self._conn = None
+
+    async def _serve(self) -> Any:
+        conn, self._conn = self._conn, None
+        try:
+            if conn is None:
+                conn = await self.api.open_connection()
+        except (proto.AuthRequired, proto.LoginRefused):
+            _LOGGER.warning("%s refused the login", self.api.get_host())
+            self.onauthfailed()
+            raise _StopListening from None
+        except proto.NoProtocol2:
+            # The firmware went back to a version before protocol 2: setting
+            # up again picks the HTTP API.
+            _LOGGER.warning("%s no longer speaks protocol 2", self.api.get_host())
+            self.api.reload()
+            raise _StopListening from None
+        except (proto.VersionMismatch, proto.ConnectionClosed, ValueError) as err:
+            # ValueError: /login answered something that isn't JSON.
+            return err
+        self.api.attach(conn)
+        model = conn.model
+
+        def on_event(name: str, d: dict) -> None:
+            data = compat.event(model, name, d)
+            if data is not None:
+                self.onpacket(data)
+
+        remove = conn.add_listener(on_event)
+        try:
+            self._opened()
+            # Events missed while the socket was down are in the sync.
+            for data in compat.state_events(conn.model):
+                self.onpacket(data)
+            await conn.run(RECEIVE_TIMEOUT)
+        finally:
+            remove()
+            self.api.detach(conn)
+        return "closed by device"
 
 
 class ESPSomfyController(DataUpdateCoordinator):
@@ -271,9 +383,24 @@ class ESPSomfyController(DataUpdateCoordinator):
             await self.ws_listener.stop()
             self.ws_listener = None
 
-    async def ws_connect(self):
-        """Connect to WebSocket."""
+    async def ws_connect(self, conn: ProtoConnection | None = None):
+        """Connect to WebSocket.
+
+        conn is protocol 2's socket when setup has just opened it.
+        """
         await self.ws_close()
+        if self.api.protocol == 2:
+            self.ws_listener = ProtoListener(
+                self.hass,
+                self.api,
+                conn,
+                self.ws_onpacket,
+                self.ws_onopen,
+                self.ws_onclose,
+                self.ws_onauthfailed,
+            )
+            self.ws_listener.start()
+            return
         self.ws_listener = SocketListener(
             self.hass,
             self.api.get_sock_url(),
@@ -436,6 +563,12 @@ class ESPSomfyController(DataUpdateCoordinator):
         data = {"event": EVT_CONNECTED, "connected": False}
         self.async_set_updated_data(data=data)
 
+    def ws_onauthfailed(self):
+        """The device refused the stored credentials: ask for new ones."""
+        entry = self.hass.config_entries.async_get_entry(self.config_entry_id)
+        if entry is not None:
+            entry.async_start_reauth(self.hass)
+
 
 class ESPSomfyAPI:
     """API for sending data to ESPSomfy RTS hardware device."""
@@ -455,6 +588,13 @@ class ESPSomfyAPI:
         self._can_update = False
         self._config_entry_id = config_entry_id
         self._configured = False
+        # 2 once the device answered on protocol 2's socket; 1 is the HTTP
+        # API and the old socket of firmware before it.
+        self.protocol = 1
+        self._token: str | None = None
+        # Kept across connections, so the device needn't send it each time.
+        self._schema: proto.Schema | None = None
+        self._conn: ProtoConnection | None = None
 
     @property
     def shades(self) -> Any:
@@ -595,9 +735,7 @@ class ESPSomfyAPI:
             if dev := get_device(
                 self.hass, f"espsomfy_{self.server_id}", self._config_entry_id
             ):
-                dr.async_get(self.hass).async_update_device(
-                    dev.id, sw_version=new_ver
-                )
+                dr.async_get(self.hass).async_update_device(dev.id, sw_version=new_ver)
         self._config["version"] = new_ver
         v = version_parse(new_ver)
         if (
@@ -621,8 +759,125 @@ class ESPSomfyAPI:
             pass
         return False
 
+    async def setup(self) -> ProtoConnection | None:
+        """Find which protocol the device speaks, take its model and set up.
+
+        Returns protocol 2's open socket, or None for firmware before it.
+        Raises ConfigEntryAuthFailed when it refuses the stored credentials,
+        ConfigEntryNotReady when it can't be reached.
+        """
+        try:
+            conn = await self.open_connection()
+        except proto.NoProtocol2:
+            conn = None
+        except (proto.AuthRequired, proto.LoginRefused) as err:
+            raise ConfigEntryAuthFailed(
+                f"{self._host} refused the login: {err}"
+            ) from err
+        except proto.VersionMismatch as err:
+            raise ConfigEntryError(f"{self._host}: {err}") from err
+        except (
+            TimeoutError,
+            aiohttp.ClientError,
+            OSError,
+            ValueError,
+            proto.ConnectionClosed,
+        ) as err:
+            raise ConfigEntryNotReady(
+                f"Could not connect to ESPSomfy RTS at {self._host}: {err}"
+            ) from err
+        if conn is None:
+            await self._setup_legacy()
+            return None
+        self.protocol = 2
+        self.attach(conn)
+        await self._forward_setups()
+        return conn
+
+    async def _setup_legacy(self) -> None:
+        """Firmware before protocol 2: the HTTP API on 8081 and the old socket.
+
+        Its token goes in the apikey header. A device secured only for its
+        configuration needs none for commands, so a refused login doesn't
+        stop it.
+        """
+        try:
+            await self._log_in()
+        except proto.LoginRefused as err:
+            _LOGGER.warning("%s: %s", self._host, err)
+        except (TimeoutError, aiohttp.ClientError, ValueError) as err:
+            _LOGGER.debug("%s: no login: %s", self._host, err)
+        await self.get_initial()
+        if not self._configured:
+            raise ConfigEntryNotReady(
+                f"Could not find ESPSomfy RTS device with address {self._api_url}"
+            )
+
+    async def _log_in(self) -> None:
+        """A token from /login with the stored credentials."""
+        self._token = await proto.login(
+            self._session,
+            self._host,
+            username=self.data.get(CONF_USERNAME) or "",
+            password=self.data.get(CONF_PASSWORD) or "",
+            pin=self.data.get(CONF_PIN) or "",
+        )
+        self._headers["apikey"] = self._token
+
+    async def open_connection(self) -> ProtoConnection:
+        """Protocol 2's socket, once the sync is done.
+
+        A token the device refuses gets one more login, as the device's
+        credentials or address may have changed.
+        """
+        try:
+            return await self._connect()
+        except proto.AuthRequired:
+            await self._log_in()
+        return await self._connect()
+
+    async def _connect(self) -> ProtoConnection:
+        conn = ProtoConnection(
+            self._session, self._host, token=self._token, schema=self._schema
+        )
+        await conn.connect()
+        return conn
+
+    def attach(self, conn: ProtoConnection) -> None:
+        """Send ops on conn, and take the device and its shades from its sync."""
+        self._conn = conn
+        self._schema = conn.schema
+        cfg = compat.config(conn.model)
+        version = cfg.pop("version")
+        self._config.update(cfg)
+        self._deviceName = cfg["hostname"]
+        self.set_firmware({"version": version})
+
+    def detach(self, conn: ProtoConnection) -> None:
+        """Conn has closed: no ops until the next."""
+        if self._conn is conn:
+            self._conn = None
+
+    def reload(self) -> None:
+        """Set the entry up again."""
+        self.hass.async_create_task(
+            self.hass.config_entries.async_reload(self._config_entry_id)
+        )
+
+    async def _forward_setups(self) -> None:
+        if self._configured:
+            return
+        _LOGGER.debug("ESPSomfy RTS Setting up entities")
+        entry = self.hass.config_entries.async_get_entry(self._config_entry_id)
+        await self.hass.config_entries.async_forward_entry_setups(entry, PLATFORMS)
+        self._configured = True
+
     async def update_firmware(self, version) -> bool:
         "Update to the latest firmware version."
+        if self.protocol == 2:
+            raise HomeAssistantError(
+                "Update the firmware from the ESPSomfy RTS device's own page"
+            )
         url = f"{self._api_url}/downloadFirmware?ver={version}"
         async with self._session.get(url, headers=self._headers) as resp:
             if resp.status == 200:
@@ -632,8 +887,10 @@ class ESPSomfyAPI:
 
     async def create_backup(self) -> bool:
         """Create a backup."""
+        # Protocol 2's firmware serves everything on port 80.
+        base = self._config_url if self.protocol == 2 else self._api_url
         try:
-            url = f"{self._api_url}/backup?attach=true"
+            url = f"{base}/backup?attach=true"
             async with self._session.get(url, headers=self._headers) as resp:
                 if resp.status != 200:
                     return False
@@ -710,17 +967,6 @@ class ESPSomfyAPI:
             if self._config["permissions"] != 1:
                 self._needsKey = True
         self.set_firmware(data)
-
-    async def discover(self) -> Any | None:
-        """Discover the device on the network."""
-        url = f"{self._api_url}{API_DISCOVERY}"
-        async with self._session.get(url, headers=self._headers) as resp:
-            if resp.status == 200:
-                data = await resp.json()
-                self.apply_data(data)
-                return data
-            _LOGGER.error(await resp.text())
-            raise DiscoveryError(f"{url} - {await resp.text()}")
 
     async def load_shades(self) -> Any | None:
         """Load all the shades from the controller."""
@@ -835,7 +1081,14 @@ class ESPSomfyAPI:
         await self.put_command(API_SETSENSOR, {"shadeId": shade_id, "windy": windy})
 
     async def put_command(self, command, data):
-        """Send a put command to the device."""
+        """Send a put command to the device.
+
+        On protocol 2 the route's op of the same name goes on the socket, and
+        a refusal is raised.
+        """
+        if self.protocol == 2:
+            await self._op(command.lstrip("/"), data or {})
+            return
         async with self._session.put(
             f"{self._api_url}{command}", json=data, headers=self._headers
         ) as resp:
@@ -844,81 +1097,36 @@ class ESPSomfyAPI:
             else:
                 _LOGGER.error(await resp.text())
 
-    async def login(self, data):
-        """Log in to the EPSSomfy hardware device."""
-        if self._canLogin:
-            async with self._session.put(
-                f"{self._api_url}{API_LOGIN}", json=data
-            ) as resp:
-                if resp.status == 200:
-                    data = await resp.json()
-                    if data.get("success"):
-                        if "apiKey" in data:
-                            self._config["apiKey"] = self._headers["apikey"] = data[
-                                "apiKey"
-                            ]
-                    else:
-                        if "type" in data:
-                            if data["type"] == 1:
-                                raise LoginError(CONF_PIN, "invalid_pin")
-                            if data["type"] == 2:
-                                raise LoginError(CONF_USERNAME, "invalid_password")
-                        raise LoginError(CONF_HOST, "invalid_login")
-
-                else:
-                    _LOGGER.error("Error logging in: %s", await resp.text())
-                    raise LoginError(f"{self._api_url} - {await resp.text()}")
+    async def _op(self, name: str, fields: dict) -> None:
+        if self._conn is None:
+            raise HomeAssistantError(f"Not connected to ESPSomfy RTS at {self._host}")
+        try:
+            await self._conn.op(name, **fields)
+        except proto.ProtoError as err:
+            raise HomeAssistantError(
+                f"ESPSomfy RTS refused {name}: {err.desc}"
+            ) from err
 
     async def group_command(self, data):
         """Send commands to ESPSomfyRTS via PUT request."""
-        async with self._session.put(
-            f"{self._api_url}{API_GROUPCOMMAND}", json=data, headers=self._headers
-        ) as resp:
-            if resp.status == 200:
-                pass
-            else:
-                _LOGGER.error(await resp.text())
+        await self.put_command(API_GROUPCOMMAND, data)
 
     async def tilt_command(self, data):
         """Send tilt commands to ESPSomfyRTS via PUT request."""
-        async with self._session.put(
-            f"{self._api_url}{API_TILTCOMMAND}", json=data, headers=self._headers
-        ) as resp:
-            if resp.status == 200:
-                pass
-            else:
-                _LOGGER.error(await resp.text())
+        await self.put_command(API_TILTCOMMAND, data)
 
     async def get_initial(self):
         """Get the initial config from ESPSomfy RTS."""
         try:
             self._session = aiohttp_client.async_get_clientsession(self.hass)
-            async with self._session.get(f"{self._api_url}{API_DISCOVERY}") as resp:
+            async with self._session.get(
+                f"{self._api_url}{API_DISCOVERY}", headers=self._headers
+            ) as resp:
                 if resp.status == 200:
                     data = await resp.json()
                     self.apply_data(data)
-                    entry = self.hass.config_entries.async_get_entry(
-                        self._config_entry_id
-                    )
-                    if not self._configured:
-                        _LOGGER.debug("ESPSomfy RTS Setting up entities")
-                        await self.hass.config_entries.async_forward_entry_setups(
-                            entry, PLATFORMS
-                        )
-                        self._configured = True
+                    await self._forward_setups()
                 else:
                     _LOGGER.error(await resp.text())
         except aiohttp.ClientError:
             pass
-
-
-class InvalidHost(HomeAssistantError):
-    """Error to indicate that hostname/IP address is invalid."""
-
-
-class DiscoveryError(HomeAssistantError):
-    """Error that occurred during discovery."""
-
-
-class LoginError(HomeAssistantError):
-    """Error that occurs when login fails."""

@@ -2,7 +2,10 @@
   "config": {
     "abort": {
       "no_devices_found": "No devices found on the network",
-      "single_instance_allowed": "Already configured. Only a single configuration possible."
+      "single_instance_allowed": "Already configured. Only a single configuration possible.",
+      "already_configured": "This device is already configured",
+      "cannot_connect": "Failed to connect",
+      "reauth_successful": "The device accepted the new credentials"
     },
     "error": {
       "cannot_connect": "Failed to connect",
@@ -14,35 +17,25 @@
       "login_error": "Invalid login"
     },
     "step": {
-      "confirm": {
-        "data": {
-          "host": "Host address for the ESPSomfy RTS device",
-          "username": "Username",
-          "password": "Password",
-          "pin": "Pin Number"
-        },
-        "title": "Configure ESPSomfy RTS",
-        "description": "Provide the configured security options for your device"
-      },
       "user": {
         "data": {
-          "host": "Host address for the ESPSomfy RTS device",
-          "username": "Username",
-          "password": "Password",
-          "pin": "Pin Number"
+          "host": "Host address for the ESPSomfy RTS device"
         },
-        "description": "Provide the configured security options for your device",
+        "description": "The address of the ESPSomfy RTS device",
         "title": "Configure ESPSomfy RTS"
       },
       "zeroconf_confirm": {
+        "description": "Do you want to add {model} with server id {server_id} to Home Assistant?",
+        "title": "ESPSomfy RTS Discovered"
+      },
+      "credentials": {
         "data": {
-          "host": "Host address for the ESPSomfy RTS device",
           "username": "Username",
           "password": "Password",
           "pin": "Pin Number"
         },
-        "description": "Do you want to add {model} with server id {server_id} to Home Assistant?",
-        "title": "ESPSomfy RTS Discovered"
+        "description": "{name} is secured: enter its credentials",
+        "title": "Log in to ESPSomfy RTS"
       }
     }
   },
