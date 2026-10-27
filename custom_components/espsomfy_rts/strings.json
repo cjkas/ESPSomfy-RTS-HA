@@ -14,7 +14,8 @@
       "unknown": "Unexpected error",
       "invalid_password": "Invalid username or password",
       "invalid_pin": "Invalid Pin",
-      "login_error": "Invalid login"
+      "login_error": "Invalid login",
+      "too_many_attempts": "Too many failed logins: try again in {retry_after} s"
     },
     "step": {
       "user": {
@@ -47,7 +48,8 @@
       "unknown": "Unexpected error",
       "invalid_password": "Invalid username or password",
       "invalid_pin": "Invalid Pin",
-      "login_error": "Invalid login"
+      "login_error": "Invalid login",
+      "too_many_attempts": "Too many failed logins: try again in {retry_after} s"
     },
     "step": {
       "init": {

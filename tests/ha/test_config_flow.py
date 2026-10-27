@@ -65,6 +65,25 @@ async def test_a_password_is_asked_and_checked(hass, host, device):
     }
 
 
+async def test_a_throttled_login_says_when_to_try_again(hass, host, device):
+    """The device's login throttle is its own error, not cannot_connect."""
+    device.security_mode = MODE_PIN
+    device.pin = "1234"
+    result = await start(hass, host)
+    device.throttled_for = 30
+    result = await hass.config_entries.flow.async_configure(
+        result["flow_id"], {"pin": "1234"}
+    )
+    assert result["errors"] == {"base": "too_many_attempts"}
+    assert result["description_placeholders"]["retry_after"] == "30"
+
+    device.throttled_for = None
+    result = await hass.config_entries.flow.async_configure(
+        result["flow_id"], {"pin": "1234"}
+    )
+    assert result["type"] is FlowResultType.CREATE_ENTRY
+
+
 @pytest.mark.parametrize("refusal", ["401", "200"])
 async def test_a_pin_is_asked_and_checked(hass, host, device, refusal):
     """Firmware before protocol 2 refused with 200 and success false."""

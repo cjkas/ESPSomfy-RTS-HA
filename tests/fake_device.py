@@ -87,6 +87,8 @@ class FakeDevice:
         # How /login refuses: "401" as the firmware does now, "200" with
         # success false as it did before protocol 2, "401 text" with no JSON.
         self.login_refusal = "401"
+        # Seconds the login throttle still refuses /login for, as 429.
+        self.throttled_for: int | None = None
         # Old firmware has no /ws: set this to the status it answers instead.
         self.ws_status: int | None = None
         # The hello sent; None for a socket that opens and says nothing.
@@ -151,6 +153,18 @@ class FakeDevice:
 
     async def _login(self, request: web.Request) -> web.Response:
         body = await request.json()
+        if self.throttled_for is not None:
+            secs = self.throttled_for
+            return web.json_response(
+                {
+                    "type": self.security_mode,
+                    "msg": f"Too many failed logins. Try again in {secs} s.",
+                    "success": False,
+                    "retryAfter": secs,
+                },
+                status=429,
+                headers={"Retry-After": str(secs)},
+            )
         ok = (
             self.security_mode == MODE_NONE
             or (self.security_mode == MODE_PIN and body.get("pin") == self.pin)
