@@ -177,6 +177,20 @@ async def test_refused_credentials_ask_for_new_ones(hass, entry, device):
     assert flows[0]["step_id"] == "credentials"
 
 
+async def test_a_throttled_login_is_retried_not_reauthed(hass, entry, device):
+    """Setup while the device's login throttle refuses HA waits and tries again."""
+    device.security_mode = MODE_PASSWORD
+    device.username, device.password = "admin", "secret"
+    device.throttled_for = 30
+    hass.config_entries.async_update_entry(
+        entry, data={**entry.data, "username": "admin", "password": "secret"}
+    )
+    assert not await hass.config_entries.async_setup(entry.entry_id)
+    await hass.async_block_till_done()
+    assert entry.state is ConfigEntryState.SETUP_RETRY
+    assert not hass.config_entries.flow.async_progress_by_handler(DOMAIN)
+
+
 async def test_a_changed_password_asks_for_new_credentials(hass, entry, device):
     """Refused again on reconnecting, the integration logs in once, then reauths."""
     device.security_mode = MODE_PASSWORD

@@ -58,7 +58,7 @@ async def _check_credentials(
 ) -> dict[str, str]:
     """The credentials for mode, once the device has taken them.
 
-    Raises LoginRefused or CannotConnect.
+    Raises LoginRefused, LoginThrottled or CannotConnect.
     """
     creds = dict(NO_CREDENTIALS)
     for key in CREDENTIALS.get(mode, ()):
@@ -66,6 +66,8 @@ async def _check_credentials(
     session = aiohttp_client.async_get_clientsession(hass)
     try:
         await proto.login(session, host, **creds)
+    except proto.LoginThrottled:
+        raise
     except (TimeoutError, aiohttp.ClientError, ValueError) as err:
         raise CannotConnect from err
     return creds
@@ -218,11 +220,15 @@ class ConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
         if mode not in CREDENTIALS:
             return self._finish(dict(NO_CREDENTIALS))
         errors = {}
+        placeholders = {CONF_NAME: _title(self.device, self.host)}
         if user_input is not None:
             try:
                 creds = await _check_credentials(self.hass, self.host, mode, user_input)
             except proto.LoginRefused:
                 errors["base"] = _login_error(mode)
+            except proto.LoginThrottled as err:
+                errors["base"] = "too_many_attempts"
+                placeholders["retry_after"] = str(err.retry_after)
             except CannotConnect:
                 errors["base"] = "cannot_connect"
             else:
@@ -231,7 +237,7 @@ class ConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
             step_id="credentials",
             data_schema=_credentials_schema(mode, user_input),
             errors=errors,
-            description_placeholders={CONF_NAME: _title(self.device, self.host)},
+            description_placeholders=placeholders,
         )
 
     async def _read_device(self, host: str) -> None:
@@ -277,6 +283,7 @@ class ESPSomfyOptionsFlowHandler(config_entries.OptionsFlow):
     ) -> FlowResult:
         """Configure options for espsomfy_rts."""
         errors = {}
+        placeholders = {}
         if user_input is not None:
             host = user_input[CONF_HOST].strip()
             if not _host_valid(host):
@@ -290,6 +297,9 @@ class ESPSomfyOptionsFlowHandler(config_entries.OptionsFlow):
                     errors["base"] = "cannot_connect"
                 except proto.LoginRefused:
                     errors["base"] = _login_error(mode)
+                except proto.LoginThrottled as err:
+                    errors["base"] = "too_many_attempts"
+                    placeholders["retry_after"] = str(err.retry_after)
                 else:
                     data = {CONF_HOST: host, **creds}
                     title = _title(device, host)
@@ -303,6 +313,7 @@ class ESPSomfyOptionsFlowHandler(config_entries.OptionsFlow):
             step_id="init",
             data_schema=_get_data_schema(user_input or self._config_entry.data),
             errors=errors,
+            description_placeholders=placeholders,
         )
 
 

@@ -11,6 +11,7 @@ from proto import (
     AuthRequired,
     ConnectionClosed,
     LoginRefused,
+    LoginThrottled,
     NoProtocol2,
     ProtoConnection,
     ProtoError,
@@ -250,6 +251,18 @@ async def test_login_gives_the_token_or_refuses(session, host, device):
     with pytest.raises(LoginRefused) as err:
         await login(session, host, pin="0000")
     assert err.value.security_mode == MODE_PIN
+
+
+async def test_a_throttled_login_says_how_long_to_wait(session, host, device):
+    """429 isn't refused credentials: it is retried as a device error is."""
+    device.security_mode = MODE_PIN
+    device.pin = "1234"
+    device.throttled_for = 30
+    with pytest.raises(LoginThrottled) as err:
+        await login(session, host, pin="1234")
+    assert err.value.retry_after == 30
+    assert isinstance(err.value, aiohttp.ClientError)
+    assert not isinstance(err.value, LoginRefused)
 
 
 @pytest.mark.parametrize(("refusal", "mode"), [("200", MODE_PASSWORD), ("401 text", 0)])

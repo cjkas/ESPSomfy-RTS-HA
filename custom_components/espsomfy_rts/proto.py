@@ -106,6 +106,21 @@ class LoginRefused(Exception):
         return cls(int(data.get("type", SECURITY_NONE)))
 
 
+class LoginThrottled(aiohttp.ClientError):
+    """/login refused to check the credentials: too many failed lately.
+
+    The firmware's login throttle answers 429 with Retry-After. It is an
+    aiohttp.ClientError, as the 429 was before it had its own class, so
+    whatever retries a device that can't be reached retries this too, and
+    nothing takes it for refused credentials.
+    """
+
+    def __init__(self, retry_after: int) -> None:
+        """Initialize with the seconds the device asks to wait."""
+        super().__init__(f"too many failed logins: try again in {retry_after} s")
+        self.retry_after = retry_after
+
+
 class Field(NamedTuple):
     """A field of the schema: its name, kind and default."""
 
@@ -671,6 +686,14 @@ class ProtoConnection:
         self._pending.clear()
 
 
+def _retry_after(value: str | None) -> int:
+    """Retry-After's seconds; 0 when it is missing or not a number."""
+    try:
+        return max(0, int(value or 0))
+    except ValueError:
+        return 0
+
+
 def _dumps(frame: dict) -> str:
     return json.dumps(frame, separators=(",", ":"))
 
@@ -696,7 +719,8 @@ async def login(
 ) -> str:
     """A token from /login; LoginRefused when the credentials aren't right.
 
-    Under None the device gives a token without checking anything.
+    LoginThrottled when the device won't check them yet. Under None the
+    device gives a token without checking anything.
     """
     body = {"username": username, "password": password, "pin": pin}
     async with asyncio.timeout(timeout):
@@ -709,6 +733,8 @@ async def login(
                 except ValueError:
                     data = {}
                 raise LoginRefused.from_reply(data)
+            if resp.status == 429:
+                raise LoginThrottled(_retry_after(resp.headers.get("Retry-After")))
             resp.raise_for_status()
             data = await resp.json(content_type=None)
     if not data.get("success"):
