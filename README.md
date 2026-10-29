@@ -2,61 +2,48 @@
 
 [![hacs_badge](https://img.shields.io/badge/HACS-Custom-41BDF5.svg?style=for-the-badge)](https://github.com/hacs/integration) 
 
-[![Open your Home Assistant instance and open a repository inside the Home Assistant Community Store.](https://my.home-assistant.io/badges/hacs_repository.svg)](https://my.home-assistant.io/redirect/hacs_repository/?owner=rstrouse&repository=espsomfy-rts-ha)
+[![Open your Home Assistant instance and open a repository inside the Home Assistant Community Store.](https://my.home-assistant.io/badges/hacs_repository.svg)](https://my.home-assistant.io/redirect/hacs_repository/?owner=cjkas&repository=ESPSomfy-RTS-HA&category=integration)
 
 
 # ESPSomfy RTS-HA 
-Control up to 32 of your somfy shades in Home Assistant and set their position using an ESP32 and an inexpensive CC1101 tranceiver module.  You may also define up to 16 group shades that will allow you to move multiple covers at once.
+Control up to 32 Somfy shades from Home Assistant, and set their positions, with an ESP32 and an inexpensive CC1101 transceiver. You can also control up to 16 groups, to move several shades at once.
 
 # Requirements
-This integration requires hardware that uses an ESP32 microcontroller and a CC1101 transceiver.  Setup for this controller can be found at the [ESPSomfy RTS hardware repositiory](https://github.com/cjkas/ESPSomfy-RTS).  You must have one of these inexpensive radios configured for your shades.
+You need an [ESPSomfy RTS](https://github.com/cjkas/ESPSomfy-RTS) device, an ESP32 with a CC1101 transceiver, set up for your shades. The [ESPSomfy RTS wiki](https://github.com/cjkas/ESPSomfy-RTS/wiki) describes how to build and configure one.
+
+| ESPSomfy RTS firmware | Integration version |
+|---|---|
+| 4.0.0 and later | 3.0.0 and later |
+| before 4.0.0 | any; 3.0.0 and later work too |
+
+Firmware 4.0.0 replaced the HTTP API on port 8081 and the socket on port 8080 with one socket on port 80 (protocol 2). Versions of this integration before 3.0.0 can't connect to it. From 3.0.0 the integration speaks protocol 2, and falls back to the old API for older firmware, so update the integration before you update the firmware.
 
 # Installation
-The easiest way to get going is to install this integration in Home Assistant using HACS as a [Custom Repository](https://hacs.xyz/docs/faq/custom_repositories/).  In the custom repository url use the following url `https://github.com/cjkas/ESPSomfy-RTS-HA`.  
+Install it with HACS as a [custom repository](https://hacs.xyz/docs/faq/custom_repositories/): add `https://github.com/cjkas/ESPSomfy-RTS-HA` with the type **Integration**, or use the button above. Then restart Home Assistant.
 
-As an alternative you may install it manually by copying the contents of the `custom_components` folder to the `config/custom_components` directory of your Home Assistant installation.
+You can also install it by hand: copy `custom_components/espsomfy_rts` into the `config/custom_components` directory of your Home Assistant, and restart it.
+
+If you installed rstrouse's version before, remove it from HACS before adding this one: both install as `espsomfy_rts`, so only one can be installed at a time.
 
 ## Setup
-Once installed, ESPSomfy-RTS-HA will automatically detect any radio devices on your local network. Just browse to Home Assistant's Settings &rarr; Devices & Services and your ESPSomfy-RTS device will show up as available to configure.
+Home Assistant finds ESPSomfy RTS devices on your network on its own (over mDNS). They show up under Settings &rarr; Devices & Services, ready to configure. To add one it hasn't found, choose **Add Integration**, pick ESPSomfy RTS, and enter the device's IP address or hostname.
 
-# Updates
-After you have installed the plugin, you will be notified when there is a new version of the plugin available.  As of v2.2.1 of the ESPSomfy RTS firmware you can also update your devices remotely using the update entity included in the plugin.  It will notify you when there is a new version to install.
+If the device's security is set to a PIN or a username and password, Home Assistant asks for them. When the device stops accepting them, for instance after you change them there, Home Assistant asks for them again under Settings &rarr; Devices & Services.
 
 # Functionality
-Once configured you will be able to open, close, and set the position of your shades using home assistant.  The integration will monitor the position of the shade regardless of how it was opened or closed.  This includes opening or closing it using a Telis remote.  Shades can be added to your dashboards and automated with Home Assistant services through automations.
+Once configured you can open, close and set the position of your shades from Home Assistant. The integration follows each shade's position however it was moved, including from a Telis remote or the ESPSomfy RTS web page. Shades can be added to your dashboards and automated with services.
 
 ![image](https://user-images.githubusercontent.com/47839015/213933858-95042e9e-0874-4e58-8123-87146439a20e.png)
 
-# Services
-There are a number of automation services available.  You can find these in the [Services](https://github.com/rstrouse/ESPSomfy-RTS-HA/wiki/Services) wiki.
+Each device gets a cover for every shade and group, switches for dry contacts and sun sensors, sunny and windy sensors, reboot and backup buttons, and diagnostic sensors. The [Entities](https://github.com/cjkas/ESPSomfy-RTS-HA/wiki/Entities) page lists them all.
 
-# Events
-The integration emits events on the Home Assistant event bus for all commands whether they have originated in Home Assistant, a remote control, or the ESPSomfy RTS web interface.  These events can be captured using the `espsomfy-rts_event` type.
+* [Services](https://github.com/cjkas/ESPSomfy-RTS-HA/wiki/Services): the actions for automations and scripts, such as moving to a position, correcting the position from another sensor, sun and wind, sending any RTS command, and backups.
+* [Events](https://github.com/cjkas/ESPSomfy-RTS-HA/wiki/Events): an `espsomfy-rts_event` is fired for every command a shade receives, including button presses on a Somfy remote, so your remotes can trigger automations.
 
-The data payload for the event includes:
-* `entity_id`: The entitiy id in home assistant for the target cover
-* `event_key`: The event that triggered this event (for now this is always shadeCommand)
-* `name`: The name assigned to the entity
-* `source`: The originator of the command.  This will be one of the following
-  * `remote`: The user pressed a button on a remote
-  * `internal`: The command originated from ESPSomfy RTS
-  * `group`: The command was part of a group command
-* `remote_address`: The address defined for the ESPSomfy RTS motor
-* `source_address`: The address of the source device.  If this is a remote it will be the address of the remote channel.  If it is part of a group request it will be the address of the group.
-* `command`: This will be one of the following commands
-  * `Up` - An up command was issued
-  * `Down` - A down command was issued
-  * `My` - A my/stop command was issued
-  * `StepUp` - A step up command was issued
-  * `StepDown` - A step down command was issued
-  * `Prog` - The prog button was pressed
-  * `My+Up` - A combination of the my and up button was pressed at the same time
-  * `My+Down` - A combination of the my and down button was pressed at the same time
-  * `Up+Down` - The up and down buttons were pressed at the same time
-  * `My+Up+Down` - The my, up, and down buttons were all pressed at the same time
-  
+## Firmware updates
+Since firmware 4.0.0 the firmware entity only shows the installed version. To update, download the release from [GitHub](https://github.com/cjkas/ESPSomfy-RTS/releases) and upload it on the device's web page, as described in [Updating ESPSomfy RTS](https://github.com/cjkas/ESPSomfy-RTS/wiki/Updating-ESPSomfy-RTS). Coming from 3.x, see [Upgrading to firmware 4.0.0](https://github.com/cjkas/ESPSomfy-RTS-HA/wiki/Upgrading-to-Firmware-4.0.0) first.
 
-![image](https://github.com/rstrouse/ESPSomfy-RTS-HA/assets/47839015/2fbf4ad8-86b4-4d4e-ac8e-ce04ba4adeeb)
+HACS tells you when there is a new version of this integration.
 
 # Development
 `custom_components/espsomfy_rts/proto.py` speaks the firmware's socket protocol 2 ([PROTOCOL.md](https://github.com/cjkas/ESPSomfy-RTS/blob/main/docs/PROTOCOL.md)). It imports nothing from Home Assistant, and `tests/proto` tests it against a fake device that replays what a real one sent (`tests/fixtures/proto2`):
@@ -72,8 +59,3 @@ The integration picks protocol 2 when the device answers on `ws://host/ws`, and 
 ```sh
 uv run --no-project --python 3.13 --with-requirements requirements_test_ha.txt -- pytest tests/ha
 ```
-
-
-
-
-
