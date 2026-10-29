@@ -13,8 +13,8 @@ You need an [ESPSomfy RTS](https://github.com/cjkas/ESPSomfy-RTS) device, an ESP
 
 | ESPSomfy RTS firmware | Integration version |
 |---|---|
-| 4.0.0 and later | 3.0.0 and later |
-| before 4.0.0 | any; 3.0.0 and later work too |
+| 4.0.0 and later | 3.0.1 and later |
+| before 4.0.0 | any; 3.0.1 and later work too |
 
 Firmware 4.0.0 replaced the HTTP API on port 8081 and the socket on port 8080 with one socket on port 80 (protocol 2). Versions of this integration before 3.0.0 can't connect to it. From 3.0.0 the integration speaks protocol 2, and falls back to the old API for older firmware, so update the integration before you update the firmware.
 
