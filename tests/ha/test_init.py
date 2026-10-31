@@ -46,7 +46,6 @@ async def test_setup_takes_the_model_from_the_sync(hass, loaded, device):
     assert memory.state == "148760"
     update = hass.states.get(entity_id(hass, "update", f"update_{UNIQUE_ID}"))
     assert update.attributes["installed_version"] == "v3.0.14"
-    assert update.attributes["supported_features"] == 0
 
 
 async def test_the_device_is_made_by_cjkas(hass, loaded, device):
@@ -452,4 +451,6 @@ async def test_old_firmware_keeps_the_http_api(hass, entry, device, host):
         )
         assert device.puts == [("shadeCommand", {"shadeId": 1, "command": "up"})]
         assert device.ops == []
+        # Old firmware checks for releases itself.
+        assert device.release_checks == 0
         await hass.config_entries.async_unload(entry.entry_id)

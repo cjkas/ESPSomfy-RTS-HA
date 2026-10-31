@@ -8,6 +8,9 @@ schema, never with the client's code under test.
 With legacy set it is firmware before protocol 2 instead: /ws answers 404,
 and /discovery, the command routes and an old socket at /legacy answer as the
 HTTP API on port 8081 and the socket on 8080 did.
+
+/releases/latest stands in for GitHub's latest release, which Home
+Assistant looks up for the update entity.
 """
 
 from __future__ import annotations
@@ -118,6 +121,17 @@ class FakeDevice:
         self.legacy = False
         # (route, body) of each command to the HTTP API.
         self.puts: list[tuple[str, dict | None]] = []
+        # The status and JSON GitHub's latest release answers with.
+        self.release: tuple[int, Any] = (
+            200,
+            {
+                "tag_name": "v4.0.1",
+                "html_url": "https://github.com/cjkas/ESPSomfy-RTS/releases/tag/v4.0.1",
+                "body": "What's new in v4.0.1",
+                "prerelease": False,
+            },
+        )
+        self.release_checks = 0
 
     def app(self) -> web.Application:
         """The aiohttp app to serve."""
@@ -129,6 +143,7 @@ class FakeDevice:
         app.router.add_get("/discovery", self._discovery)
         app.router.add_put("/{route}", self._put)
         app.router.add_get("/legacy", self._legacy_ws)
+        app.router.add_get("/releases/latest", self._latest_release)
         return app
 
     @asynccontextmanager
@@ -224,6 +239,11 @@ class FakeDevice:
         await asyncio.sleep(self.backup_delay)
         status, body = self.backup_reply
         return web.Response(status=status, text=body)
+
+    async def _latest_release(self, request: web.Request) -> web.Response:
+        self.release_checks += 1
+        status, body = self.release
+        return web.json_response(body, status=status)
 
     async def _discovery(self, request: web.Request) -> web.Response:
         if not self.legacy:

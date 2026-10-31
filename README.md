@@ -41,7 +41,7 @@ Each device gets a cover for every shade and group, switches for dry contacts an
 * [Events](https://github.com/cjkas/ESPSomfy-RTS-HA/wiki/Events): an `espsomfy-rts_event` is fired for every command a shade receives, including button presses on a Somfy remote, so your remotes can trigger automations.
 
 ## Firmware updates
-Since firmware 4.0.0 the firmware entity only shows the installed version. To update, download the release from [GitHub](https://github.com/cjkas/ESPSomfy-RTS/releases) and upload it on the device's web page, as described in [Updating ESPSomfy RTS](https://github.com/cjkas/ESPSomfy-RTS/wiki/Updating-ESPSomfy-RTS). Coming from 3.x, see [Upgrading to firmware 4.0.0](https://github.com/cjkas/ESPSomfy-RTS-HA/wiki/Upgrading-to-Firmware-4.0.0) first.
+Since firmware 4.0.0 the device no longer looks for releases itself. Home Assistant checks GitHub for the latest release every 6 hours, and the firmware entity shows when a newer one is out, with its release notes, but it can't install it. To update, download the release from [GitHub](https://github.com/cjkas/ESPSomfy-RTS/releases) and upload it on the device's web page, as described in [Updating ESPSomfy RTS](https://github.com/cjkas/ESPSomfy-RTS/wiki/Updating-ESPSomfy-RTS). Coming from 3.x, see [Upgrading to firmware 4.0.0](https://github.com/cjkas/ESPSomfy-RTS-HA/wiki/Upgrading-to-Firmware-4.0.0) first.
 
 HACS tells you when there is a new version of this integration.
 

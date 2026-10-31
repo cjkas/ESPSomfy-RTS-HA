@@ -22,6 +22,7 @@ from pytest_homeassistant_custom_component.common import (  # noqa: E402
     MockConfigEntry,
 )
 
+from custom_components.espsomfy_rts import update  # noqa: E402
 from custom_components.espsomfy_rts.const import DOMAIN  # noqa: E402
 
 
@@ -38,9 +39,16 @@ def device() -> FakeDevice:
 
 
 @pytest.fixture
-async def host(device: FakeDevice, socket_enabled):
-    """The fake device's address, served for the test."""
+async def host(device: FakeDevice, socket_enabled, monkeypatch):
+    """The fake device's address, served for the test.
+
+    The fake device stands in for GitHub's latest release too: no test asks
+    GitHub.
+    """
     async with device.serve() as address:
+        monkeypatch.setattr(
+            update, "LATEST_RELEASE_URL", f"http://{address}/releases/latest"
+        )
         yield address
 
 
