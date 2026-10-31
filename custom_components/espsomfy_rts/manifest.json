@@ -1,14 +1,14 @@
 {
   "domain": "espsomfy_rts",
   "name": "ESPSomfy RTS",
-  "codeowners": ["@rstrouse"],
+  "codeowners": ["@cjkas"],
   "config_flow": true,
   "dependencies": [],
-  "documentation": "https://github.com/rstrouse/ESPSomfy-RTS/wiki/Configuring-the-Software",
+  "documentation": "https://github.com/cjkas/ESPSomfy-RTS-HA",
   "homekit": {},
   "integration_type": "hub",
   "iot_class": "local_push",
-  "issue_tracker": "https://github.com/rstrouse/ESPSomfy-RTS/issues",
+  "issue_tracker": "https://github.com/cjkas/ESPSomfy-RTS-HA/issues",
   "requirements": [],
   "ssdp": [
     {
