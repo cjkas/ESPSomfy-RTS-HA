@@ -307,6 +307,10 @@ class ESPSomfyOptionsFlowHandler(config_entries.OptionsFlow):
                     self.hass.config_entries.async_update_entry(
                         self._config_entry, title=title, data=data
                     )
+                    # The socket is still on the old address and credentials.
+                    self.hass.config_entries.async_schedule_reload(
+                        self._config_entry.entry_id
+                    )
                     return self.async_create_entry(title=title, data=data)
 
         return self.async_show_form(
