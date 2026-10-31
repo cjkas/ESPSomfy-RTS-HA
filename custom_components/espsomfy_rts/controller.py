@@ -14,6 +14,7 @@ from typing import Any
 import aiohttp
 from packaging.version import parse as version_parse
 
+from homeassistant.components import persistent_notification
 from homeassistant.components.cover import CoverDeviceClass, CoverEntityFeature
 from homeassistant.const import (
     CONF_HOST,
@@ -944,8 +945,25 @@ class ESPSomfyAPI:
         """Save the device's backup in HA's config directory; returns its path.
 
         Raises HomeAssistantError when no backup was saved, and why: a backup
-        is never lost quietly.
+        is never lost quietly. The failure is a persistent notification too,
+        for backups nobody watches, as an automation's; the next backup saved
+        dismisses it.
         """
+        notification_id = f"{DOMAIN}_backup_{self.server_id}"
+        try:
+            path = await self._save_backup()
+        except HomeAssistantError as err:
+            persistent_notification.async_create(
+                self.hass,
+                f"{dt_util.now().strftime('%Y-%m-%d %H:%M')}: {err}",
+                title=f"ESPSomfy RTS backup of {self._deviceName} failed",
+                notification_id=notification_id,
+            )
+            raise
+        persistent_notification.async_dismiss(self.hass, notification_id)
+        return path
+
+    async def _save_backup(self) -> str:
         # Protocol 2's firmware serves everything on port 80.
         base = self._config_url if self.protocol == 2 else self._api_url
         url = f"{base}/backup?attach=true"

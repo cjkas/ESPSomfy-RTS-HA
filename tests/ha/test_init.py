@@ -8,6 +8,7 @@ from harness import UNIQUE_ID, until
 from fake_device import MODE_PASSWORD, SERVER_ID
 import pytest
 
+from homeassistant.components import persistent_notification
 from homeassistant.config_entries import SOURCE_REAUTH, ConfigEntryState
 from homeassistant.const import STATE_UNAVAILABLE
 from homeassistant.exceptions import HomeAssistantError
@@ -192,6 +193,12 @@ def saved_backups(config_dir) -> list:
     return list((config_dir / f"ESPSomfyRTS_{SERVER_ID}").glob("*.backup"))
 
 
+def backup_notifications(hass) -> list[dict]:
+    """The persistent notifications about the device's backup."""
+    notifications = persistent_notification._async_get_or_create_notifications(hass)
+    return [n for key, n in notifications.items() if key.endswith(SERVER_ID)]
+
+
 @pytest.mark.parametrize(
     ("reply", "error"),
     [
@@ -208,6 +215,27 @@ async def test_a_backup_the_device_does_not_give_is_an_error(
     with pytest.raises(HomeAssistantError, match=error):
         await press_backup(hass)
     assert saved_backups(tmp_path) == []
+    [notification] = backup_notifications(hass)
+    assert notification["title"] == "ESPSomfy RTS backup of hostname 3 failed"
+    assert error in notification["message"]
+
+
+async def test_a_failed_backup_stays_noticed_until_one_is_saved(
+    hass, loaded, device, tmp_path
+):
+    """Failures share one notification; the next backup saved dismisses it."""
+    hass.config.config_dir = str(tmp_path)
+    await press_backup(hass)
+    assert backup_notifications(hass) == []
+    for status in (500, 503):
+        device.backup_reply = (status, "backup failed")
+        with pytest.raises(HomeAssistantError):
+            await press_backup(hass)
+    [notification] = backup_notifications(hass)
+    assert "answered 503" in notification["message"]
+    device.backup_reply = (200, '{"version": 23, "shades": []}')
+    await press_backup(hass)
+    assert backup_notifications(hass) == []
 
 
 async def test_a_backup_that_cannot_be_saved_is_an_error(hass, loaded, tmp_path):
