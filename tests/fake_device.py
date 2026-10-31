@@ -12,6 +12,7 @@ HTTP API on port 8081 and the socket on 8080 did.
 
 from __future__ import annotations
 
+import asyncio
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 import json
@@ -110,8 +111,10 @@ class FakeDevice:
         self.schema_params: list[str | None] = []
         # The apikey header of each /backup.
         self.backups: list[str | None] = []
-        # The status and body /backup answers with once authorized.
+        # The status and body /backup answers with once authorized, after
+        # this many seconds.
         self.backup_reply = (200, '{"version": 23, "shades": []}')
+        self.backup_delay = 0.0
         self.legacy = False
         # (route, body) of each command to the HTTP API.
         self.puts: list[tuple[str, dict | None]] = []
@@ -218,6 +221,7 @@ class FakeDevice:
         self.backups.append(token)
         if not self._authorized(token):
             return web.Response(status=401, text="Unauthorized API Key")
+        await asyncio.sleep(self.backup_delay)
         status, body = self.backup_reply
         return web.Response(status=status, text=body)
 

@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
-from datetime import datetime
 import json
 import logging
 import os
@@ -953,15 +952,23 @@ class ESPSomfyAPI:
         try:
             path = await self._save_backup()
         except HomeAssistantError as err:
-            persistent_notification.async_create(
-                self.hass,
-                f"{dt_util.now().strftime('%Y-%m-%d %H:%M')}: {err}",
-                title=f"ESPSomfy RTS backup of {self._deviceName} failed",
-                notification_id=notification_id,
-            )
+            self._backup_failed(notification_id, err)
             raise
+        except Exception as err:  # noqa: BLE001
+            # Unexpected, but a backup still never fails quietly.
+            failure = HomeAssistantError(f"No backup: {err!r}")
+            self._backup_failed(notification_id, failure)
+            raise failure from err
         persistent_notification.async_dismiss(self.hass, notification_id)
         return path
+
+    def _backup_failed(self, notification_id: str, err: HomeAssistantError) -> None:
+        persistent_notification.async_create(
+            self.hass,
+            f"{dt_util.now().strftime('%Y-%m-%d %H:%M')}: {err}",
+            title=f"ESPSomfy RTS backup of {self._deviceName} failed",
+            notification_id=notification_id,
+        )
 
     async def _save_backup(self) -> str:
         # Protocol 2's firmware serves everything on port 80.
@@ -977,7 +984,7 @@ class ESPSomfyAPI:
             raise HomeAssistantError(
                 f"No backup: {self._host} refused the login: {err}"
             ) from err
-        except (TimeoutError, aiohttp.ClientError, ValueError) as err:
+        except (TimeoutError, aiohttp.ClientError, OSError, ValueError) as err:
             raise HomeAssistantError(
                 f"No backup: getting it from {self._host} failed: {err!r}"
             ) from err
@@ -988,9 +995,8 @@ class ESPSomfyAPI:
             )
         if not body.strip():
             raise HomeAssistantError(f"No backup: {self._host} sent an empty one")
-        local_dt = dt_util.as_local(datetime.now(dt_util.UTC))
         path = os.path.join(
-            self.backup_dir, f"{local_dt.strftime('%Y-%m-%dT%H_%M_%S')}.backup"
+            self.backup_dir, f"{dt_util.now().strftime('%Y-%m-%dT%H_%M_%S')}.backup"
         )
         try:
             await self.hass.async_add_executor_job(_write_backup, path, body)
