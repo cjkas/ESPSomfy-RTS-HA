@@ -543,7 +543,13 @@ class ProtoConnection:
                     if resends:
                         await asyncio.sleep(0.2 * resends)
                         pending.reply = loop.create_future()
-                    await self._ws.send_str(pending.text)
+                    try:
+                        await self._ws.send_str(pending.text)
+                    except (aiohttp.ClientError, ConnectionError) as err:
+                        # The socket closed after the check above.
+                        raise ProtoError(
+                            "closed", f"The connection closed: {err}"
+                        ) from None
                     try:
                         return await pending.reply
                     except _TryAgain:

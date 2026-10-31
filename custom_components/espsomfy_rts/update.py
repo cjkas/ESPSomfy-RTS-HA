@@ -144,11 +144,10 @@ class ESPSomfyRTSUpdateEntity(ESPSomfyEntity, UpdateEntity):
         self, version: str | None, backup: bool, **kwargs: Any
     ) -> None:
         """Install an update."""
-        success = True
         if backup:
-            success = await self._controller.create_backup()
-        if success:
-            # We cast here, we know that the latest_version is supposed to be a string.
-            version = cast(str, self.latest_version)
-            if version is not None:
-                await self.controller.update_firmware(version)
+            # Raises when there is no backup, so nothing is installed without one.
+            await self._controller.create_backup()
+        # We cast here, we know that the latest_version is supposed to be a string.
+        version = cast(str, self.latest_version)
+        if version is not None:
+            await self.controller.update_firmware(version)

@@ -8,14 +8,16 @@ from harness import UNIQUE_ID, until
 from fake_device import MODE_PASSWORD, SERVER_ID
 import pytest
 
+from homeassistant.components import persistent_notification
 from homeassistant.config_entries import SOURCE_REAUTH, ConfigEntryState
 from homeassistant.const import STATE_UNAVAILABLE
 from homeassistant.exceptions import HomeAssistantError
 from homeassistant.helpers import entity_registry as er
 
-from custom_components.espsomfy_rts import compat
+from custom_components.espsomfy_rts import compat, controller as controller_module
 from custom_components.espsomfy_rts.const import DOMAIN
 from custom_components.espsomfy_rts.controller import ESPSomfyAPI
+from custom_components.espsomfy_rts.update import ESPSomfyRTSUpdateEntity
 
 
 def entity_id(hass, platform: str, unique_id: str) -> str:
@@ -125,6 +127,31 @@ async def test_a_refused_op_is_an_error(hass, loaded, device):
         )
 
 
+@pytest.mark.parametrize("tilt_type", [1, 2, 3, 4])
+async def test_every_tilt_type_has_a_tilt_position(hass, loaded, device, tilt_type):
+    """A shade of any tilt type but none keeps its tilt; 4 is euromode."""
+    await device.send("shadeState", shadeId=1, tiltType=tilt_type, tiltPosition=30)
+    await until(lambda: cover(hass, 1).attributes.get("current_tilt_position") == 70)
+
+
+async def test_the_current_tilt_turns_as_the_rest(hass, loaded, device):
+    """The device's tilt is how far closed, as its position is."""
+    shade = cover(hass, 1).entity_id
+    for service, field in (
+        ("set_current_position", "position"),
+        ("set_tilt_position", "tilt_position"),
+        ("set_current_tilt_position", "tilt_position"),
+    ):
+        await hass.services.async_call(
+            DOMAIN, service, {"entity_id": shade, field: 30}, blocking=True
+        )
+    assert device.ops == [
+        ("setPositions", {"shadeId": 1, "position": 70}),
+        ("tiltCommand", {"shadeId": 1, "target": 70}),
+        ("setPositions", {"shadeId": 1, "tiltPosition": 70}),
+    ]
+
+
 async def test_reboot_is_an_op(hass, loaded, device):
     """The reboot button sends reboot on the socket."""
     button = entity_id(hass, "button", f"reboot_{UNIQUE_ID}")
@@ -144,8 +171,49 @@ async def test_a_lost_socket_comes_back(hass, loaded, device):
     assert device.schema_params[-1] is not None
 
 
-async def test_secured_setup_logs_in(hass, entry, device, tmp_path):
-    """The stored credentials get a token, which the socket and backup take."""
+async def test_reboot_follows_the_socket_and_backup_stays(hass, loaded, device):
+    """Reboot is an op on the socket; Backup is HTTP, so a press always tries.
+
+    HA skips an unavailable button without a word.
+    """
+    reboot = entity_id(hass, "button", f"reboot_{UNIQUE_ID}")
+    backup = entity_id(hass, "button", f"backup_{UNIQUE_ID}")
+    await device.close_sockets()
+    await until(lambda: cover(hass, 1).state == STATE_UNAVAILABLE)
+    assert hass.states.get(reboot).state == STATE_UNAVAILABLE
+    assert hass.states.get(backup).state != STATE_UNAVAILABLE
+    await until(lambda: hass.states.get(reboot).state != STATE_UNAVAILABLE)
+
+
+async def press_backup(hass) -> None:
+    """Press the Backup button."""
+    button = entity_id(hass, "button", f"backup_{UNIQUE_ID}")
+    await hass.services.async_call(
+        "button", "press", {"entity_id": button}, blocking=True
+    )
+
+
+def saved_backups(config_dir) -> list:
+    """The backups saved under config_dir."""
+    return list((config_dir / f"ESPSomfyRTS_{SERVER_ID}").glob("*.backup"))
+
+
+def backup_notifications(hass) -> list[dict]:
+    """The persistent notifications about the device's backup."""
+    notifications = persistent_notification._async_get_or_create_notifications(hass)
+    return [n for key, n in notifications.items() if key.endswith(SERVER_ID)]
+
+
+async def backup_fails(hass, error: str) -> None:
+    """Pressing Backup raises error, which the notification gives too."""
+    with pytest.raises(HomeAssistantError, match=error):
+        await press_backup(hass)
+    [notification] = backup_notifications(hass)
+    assert error in notification["message"]
+
+
+async def set_up_secured(hass, entry, device) -> None:
+    """The entry set up on a device Secured with a password."""
     device.security_mode = MODE_PASSWORD
     device.username, device.password = "admin", "secret"
     hass.config_entries.async_update_entry(
@@ -154,14 +222,129 @@ async def test_secured_setup_logs_in(hass, entry, device, tmp_path):
     assert await hass.config_entries.async_setup(entry.entry_id)
     await hass.async_block_till_done()
     assert entry.state is ConfigEntryState.LOADED
+
+
+@pytest.mark.parametrize(
+    ("reply", "error"),
+    [
+        ((500, "backup failed"), "answered 500 backup failed"),
+        ((200, ""), "sent an empty one"),
+    ],
+)
+async def test_a_backup_the_device_does_not_give_is_an_error(
+    hass, loaded, device, tmp_path, reply, error
+):
+    """Backup says why nothing was saved, rather than nothing."""
+    hass.config.config_dir = str(tmp_path)
+    device.backup_reply = reply
+    with pytest.raises(HomeAssistantError, match=error):
+        await press_backup(hass)
+    assert saved_backups(tmp_path) == []
+    [notification] = backup_notifications(hass)
+    assert notification["title"] == "ESPSomfy RTS backup of hostname 3 failed"
+    assert error in notification["message"]
+
+
+async def test_a_failed_backup_stays_noticed_until_one_is_saved(
+    hass, loaded, device, tmp_path
+):
+    """Failures share one notification; the next backup saved dismisses it."""
+    hass.config.config_dir = str(tmp_path)
+    await press_backup(hass)
+    assert backup_notifications(hass) == []
+    for status in (500, 503):
+        device.backup_reply = (status, "backup failed")
+        with pytest.raises(HomeAssistantError):
+            await press_backup(hass)
+    [notification] = backup_notifications(hass)
+    assert "answered 503" in notification["message"]
+    device.backup_reply = (200, '{"version": 23, "shades": []}')
+    await press_backup(hass)
+    assert backup_notifications(hass) == []
+
+
+async def test_a_backup_asked_again_after_a_login_is_not_asked_a_third_time(
+    hass, loaded, device, tmp_path
+):
+    """A 401 gets one more login, and a second 401 is the error."""
+    hass.config.config_dir = str(tmp_path)
+    device.backup_reply = (401, "Unauthorized API Key")
+    await backup_fails(hass, "answered 401 Unauthorized API Key")
+    assert len(device.backups) == 2
+
+
+async def test_a_backup_whose_login_is_refused_is_an_error(
+    hass, entry, device, tmp_path
+):
+    """Credentials the device no longer takes are the backup's error."""
+    await set_up_secured(hass, entry, device)
+    hass.config.config_dir = str(tmp_path)
+    device.token, device.password = "another-token", "changed"
+    await backup_fails(hass, "refused the login")
+    assert saved_backups(tmp_path) == []
+    await hass.config_entries.async_unload(entry.entry_id)
+
+
+async def test_a_backup_that_takes_too_long_is_an_error(
+    hass, loaded, device, tmp_path
+):
+    """A device that doesn't answer in time is the backup's error."""
+    hass.config.config_dir = str(tmp_path)
+    device.backup_delay = 1
+    with patch.object(controller_module, "BACKUP_TIMEOUT", 0.05):
+        await backup_fails(hass, "TimeoutError")
+
+
+async def test_an_unexpected_backup_error_is_noticed_too(hass, loaded, tmp_path):
+    """An error nobody foresaw still raises HomeAssistantError and notifies."""
+    hass.config.config_dir = str(tmp_path)
+    with patch.object(
+        controller_module, "_write_backup", side_effect=RuntimeError("boom")
+    ):
+        await backup_fails(hass, "boom")
+
+
+async def test_a_backup_that_cannot_be_saved_is_an_error(hass, loaded, tmp_path):
+    """A backup HA can't write is an error too."""
+    taken = tmp_path / "taken"
+    taken.write_text("a file, not a directory")
+    hass.config.config_dir = str(taken)
+    with pytest.raises(HomeAssistantError, match="saving .* failed"):
+        await press_backup(hass)
+
+
+async def test_an_update_asking_for_a_backup_stops_without_one(hass, loaded):
+    """Nothing is installed when the backup asked for wasn't saved."""
+    controller = hass.data[DOMAIN][loaded.entry_id]
+    entity = ESPSomfyRTSUpdateEntity(controller)
+    with (
+        patch.object(
+            controller, "create_backup", side_effect=HomeAssistantError("No backup")
+        ),
+        patch.object(controller, "update_firmware") as update_firmware,
+        pytest.raises(HomeAssistantError, match="No backup"),
+    ):
+        await entity.async_install(None, True)
+    update_firmware.assert_not_called()
+
+
+async def test_secured_setup_logs_in(hass, entry, device, tmp_path):
+    """The stored credentials get a token, which the socket and backup take."""
+    await set_up_secured(hass, entry, device)
     hass.config.config_dir = str(tmp_path)
     button = entity_id(hass, "button", f"backup_{UNIQUE_ID}")
     await hass.services.async_call(
         "button", "press", {"entity_id": button}, blocking=True
     )
     assert device.backups == [device.token]
-    [backup] = (tmp_path / f"ESPSomfyRTS_{SERVER_ID}").glob("*.backup")
+    [backup] = saved_backups(tmp_path)
     assert backup.read_text() == '{"version": 23, "shades": []}'
+    # A security save gives the device another token: one more login.
+    old, device.token = device.token, "another-token"
+    backup.unlink()
+    await press_backup(hass)
+    assert device.backups[1:] == [old, "another-token"]
+    assert len(saved_backups(tmp_path)) == 1
     await hass.config_entries.async_unload(entry.entry_id)
 
 

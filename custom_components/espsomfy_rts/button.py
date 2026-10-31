@@ -42,6 +42,9 @@ class ESPSomfyButtonDescription(
     events: dict | None = None
     action: dict | None = None
     features: Iterable[int] | None = None
+    # Unavailable while the socket is down. HA skips an unavailable button
+    # without a word, so one that works without the socket stays available.
+    needs_socket: bool = True
 
 
 async def async_setup_entry(
@@ -82,6 +85,8 @@ async def async_setup_entry(
                     action={"apimethod": "create_backup"},
                     features=2,
                     icon="mdi:download",
+                    # /backup is HTTP: a press always tries, and fails out loud.
+                    needs_socket=False,
                 ),
             )
         )
@@ -120,6 +125,7 @@ class ESPSomfyButton(ESPSomfyEntity, ButtonEntity):
         self._action = cfg.action
         self._attr_assumed_state = True
         self._attr_supported_features = cfg.features
+        self._needs_socket = cfg.needs_socket
 
         super().__init__(controller=controller, data=None)
 
@@ -136,11 +142,14 @@ class ESPSomfyButton(ESPSomfyEntity, ButtonEntity):
 
     def _handle_coordinator_update(self) -> None:
         """Handle updated data from the coordinator."""
-        if self._controller.data.get("event", "") == EVT_CONNECTED:
-            if "connected" in self._controller.data and self._attr_available != bool(
+        if (
+            self._needs_socket
+            and self._controller.data.get("event", "") == EVT_CONNECTED
+        ):
+            if "connected" in self._controller.data and self._available != bool(
                 self._controller.data["connected"]
             ):
-                self._attr_available = bool(self._controller.data["connected"])
+                self._available = bool(self._controller.data["connected"])
                 self.async_write_ha_state()
 
     @property
