@@ -77,6 +77,19 @@ async def test_a_short_op_is_not_resent_on_a_busy_without_id(connect, device):
     assert err.value.code == "timeout"
 
 
+async def test_an_op_on_a_socket_closing_under_it_is_closed(connect):
+    """A send that fails as the socket closes raises closed, not the OS's error."""
+    conn = await connect(run=True)
+
+    async def closing(_text: str) -> None:
+        raise ConnectionResetError("Cannot write to closing transport")
+
+    conn._ws.send_str = closing
+    with pytest.raises(ProtoError) as err:
+        await conn.op("reboot")
+    assert err.value.code == "closed"
+
+
 async def test_an_op_the_device_does_not_have_is_not_sent(connect, device):
     """Unknown ops and fields are refused before anything goes."""
     conn = await connect()

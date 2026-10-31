@@ -137,10 +137,10 @@ class ESPSomfyButton(ESPSomfyEntity, ButtonEntity):
     def _handle_coordinator_update(self) -> None:
         """Handle updated data from the coordinator."""
         if self._controller.data.get("event", "") == EVT_CONNECTED:
-            if "connected" in self._controller.data and self._attr_available != bool(
+            if "connected" in self._controller.data and self._available != bool(
                 self._controller.data["connected"]
             ):
-                self._attr_available = bool(self._controller.data["connected"])
+                self._available = bool(self._controller.data["connected"])
                 self.async_write_ha_state()
 
     @property

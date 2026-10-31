@@ -110,6 +110,8 @@ class FakeDevice:
         self.schema_params: list[str | None] = []
         # The apikey header of each /backup.
         self.backups: list[str | None] = []
+        # The status and body /backup answers with once authorized.
+        self.backup_reply = (200, '{"version": 23, "shades": []}')
         self.legacy = False
         # (route, body) of each command to the HTTP API.
         self.puts: list[tuple[str, dict | None]] = []
@@ -216,7 +218,8 @@ class FakeDevice:
         self.backups.append(token)
         if not self._authorized(token):
             return web.Response(status=401, text="Unauthorized API Key")
-        return web.Response(text='{"version": 23, "shades": []}')
+        status, body = self.backup_reply
+        return web.Response(status=status, text=body)
 
     async def _discovery(self, request: web.Request) -> web.Response:
         if not self.legacy:

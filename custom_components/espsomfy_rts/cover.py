@@ -466,7 +466,7 @@ class ESPSomfyShade(ESPSomfyEntity, CoverEntity):
             self._has_tilt = bool(data["hasTilt"])
         if "tiltType" in self._controller.data:
             match int(self._controller.data["tiltType"]):
-                case 1 | 2:
+                case 1 | 2 | 4:
                     self._has_tilt = True
                 case 3:
                     self._has_tilt = True
@@ -850,9 +850,14 @@ class ESPSomfyShade(ESPSomfyEntity, CoverEntity):
 
     async def async_set_current_tilt_position(self, **kwargs: Any) -> None:
         """Set the current tilt position for the device without moving it."""
-        await self._controller.api.set_current_tilt_position(
-            self._shade_id, int(kwargs[ATTR_TILT_POSITION])
-        )
+        if self._flip_position is True:
+            await self._controller.api.set_current_tilt_position(
+                self._shade_id, int(kwargs[ATTR_TILT_POSITION])
+            )
+        else:
+            await self._controller.api.set_current_tilt_position(
+                self._shade_id, 100 - int(kwargs[ATTR_TILT_POSITION])
+            )
 
     async def async_set_sunny(self, **kwargs: Any) -> None:
         """Set the sensor value for the device by sending the appropriate frames."""

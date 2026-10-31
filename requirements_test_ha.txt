@@ -2,4 +2,3 @@
 # Home Assistant's test harness, pinned with the Home Assistant it installs
 # (2026.2.3). It runs on Linux and macOS only.
 pytest-homeassistant-custom-component==0.13.316
-aiofiles

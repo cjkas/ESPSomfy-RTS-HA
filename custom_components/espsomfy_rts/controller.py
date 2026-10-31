@@ -11,7 +11,6 @@ import os
 import time
 from typing import Any
 
-import aiofiles
 import aiohttp
 from packaging.version import parse as version_parse
 
@@ -91,6 +90,8 @@ RECEIVE_TIMEOUT = 60
 MAX_BACKOFF = 30
 # A connection that stayed up this long resets the backoff.
 STABLE_AFTER = 60
+# The device puts the backup together before it answers.
+BACKUP_TIMEOUT = 30
 
 
 def get_device(
@@ -105,6 +106,13 @@ def get_device(
             (DOMAIN, unique_id), config_entry_id
         )
     return registry.async_get_device(identifiers={(DOMAIN, unique_id)})
+
+
+def _write_backup(path: str, body: bytes) -> None:
+    """The backup as the device sent it, in its own file."""
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    with open(path, "wb") as f:
+        f.write(body)
 
 
 class _StopListening(Exception):
@@ -449,8 +457,8 @@ class ESPSomfyController(DataUpdateCoordinator):
         )
         self.ws_listener.start()
 
-    async def create_backup(self) -> bool:
-        """Create a backup of the configuration and stores it in HA."""
+    async def create_backup(self) -> str:
+        """Save the device's backup in HA's config directory; returns its path."""
         return await self.api.create_backup()
 
     async def update_firmware(self, version) -> bool:
@@ -932,29 +940,51 @@ class ESPSomfyAPI:
             _LOGGER.error(await resp.text())
         return False
 
-    async def create_backup(self) -> bool:
-        """Create a backup."""
+    async def create_backup(self) -> str:
+        """Save the device's backup in HA's config directory; returns its path.
+
+        Raises HomeAssistantError when no backup was saved, and why: a backup
+        is never lost quietly.
+        """
         # Protocol 2's firmware serves everything on port 80.
         base = self._config_url if self.protocol == 2 else self._api_url
+        url = f"{base}/backup?attach=true"
         try:
-            url = f"{base}/backup?attach=true"
+            status, body = await self._get_backup(url)
+            if status == 401:
+                # The token changed since the login, as a security save does.
+                await self._log_in()
+                status, body = await self._get_backup(url)
+        except proto.LoginRefused as err:
+            raise HomeAssistantError(
+                f"No backup: {self._host} refused the login: {err}"
+            ) from err
+        except (TimeoutError, aiohttp.ClientError, ValueError) as err:
+            raise HomeAssistantError(
+                f"No backup: getting it from {self._host} failed: {err!r}"
+            ) from err
+        if status != 200:
+            reason = body.decode(errors="replace").strip()[:200]
+            raise HomeAssistantError(
+                f"No backup: {self._host} answered {status} {reason}"
+            )
+        if not body.strip():
+            raise HomeAssistantError(f"No backup: {self._host} sent an empty one")
+        local_dt = dt_util.as_local(datetime.now(dt_util.UTC))
+        path = os.path.join(
+            self.backup_dir, f"{local_dt.strftime('%Y-%m-%dT%H_%M_%S')}.backup"
+        )
+        try:
+            await self.hass.async_add_executor_job(_write_backup, path, body)
+        except OSError as err:
+            raise HomeAssistantError(f"No backup: saving {path} failed: {err}") from err
+        _LOGGER.info("Saved the backup of %s to %s", self._host, path)
+        return path
+
+    async def _get_backup(self, url: str) -> tuple[int, bytes]:
+        async with asyncio.timeout(BACKUP_TIMEOUT):
             async with self._session.get(url, headers=self._headers) as resp:
-                if resp.status != 200:
-                    return False
-
-                os.makedirs(self.backup_dir, exist_ok=True)
-
-                data = await resp.text(encoding=None)
-                local_dt = dt_util.as_local(datetime.now(dt_util.UTC))
-                fpath = self.hass.config.path(
-                    f"{self.backup_dir}/{local_dt.strftime('%Y-%m-%dT%H_%M_%S')}.backup"
-                )
-            async with aiofiles.open(fpath, mode="wb+") as f:
-                await f.write(data.encode())
-                return True
-        except Exception as e:  # noqa: BLE001
-            _LOGGER.error("An error occurred while creating backup: %s", e)
-            return False
+                return resp.status, await resp.read()
 
     def get_backups(self) -> list[str] | None:
         """Get a list of all the available backups."""
