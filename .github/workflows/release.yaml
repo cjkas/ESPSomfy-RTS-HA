@@ -27,11 +27,13 @@ jobs:
           persist-credentials: false
 
       # Only the tracked files, at the zip's root: what goes into
-      # custom_components/espsomfy_rts.
+      # custom_components/espsomfy_rts. The commit's date on every file, so
+      # the same commit always gives the same zip and SHA256SUMS.
       - name: Zip the integration
         run: |
           mkdir dist
-          git archive --format=zip -o dist/espsomfy_rts.zip HEAD:custom_components/espsomfy_rts
+          git archive --format=zip --mtime="$(git log -1 --format=%cI)" \
+            -o dist/espsomfy_rts.zip HEAD:custom_components/espsomfy_rts
           cd dist
           sha256sum * > SHA256SUMS
           cat SHA256SUMS

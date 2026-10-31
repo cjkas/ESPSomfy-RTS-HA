@@ -1,7 +1,0 @@
-# Security rules only (bandit, S): CI runs `ruff check custom_components`.
-[lint]
-select = ["S"]
-
-[lint.per-file-ignores]
-# Tests assert, and their fake device has fixed passwords.
-"tests/**" = ["S101", "S105", "S106"]

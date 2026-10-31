@@ -28,3 +28,7 @@ updates:
       interval: weekly
     cooldown:
       default-days: 7
+    ignore:
+      # Each release pins a Home Assistant and its Python (3.14 by
+      # 0.13.375), and tests.yaml runs 3.13: bump it by hand, with both.
+      - dependency-name: "pytest-homeassistant-custom-component"

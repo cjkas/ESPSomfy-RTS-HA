@@ -29,7 +29,7 @@ jobs:
       - name: Integration tests in Home Assistant's harness
         run: uv run --no-project --python 3.13 --with-requirements requirements_test_ha.txt -- pytest tests/ha
 
-  # ruff's bandit rules (S), set in ruff.toml.
+  # ruff's bandit rules (S) only, so editors keep their own ruff settings.
   security-lint:
     runs-on: "ubuntu-latest"
     steps:
@@ -38,4 +38,4 @@ jobs:
           persist-credentials: false
       - uses: astral-sh/setup-uv@d0cc045d04ccac9d8b7881df0226f9e82c39688e # v6.8.0
       - name: Security lint
-        run: uvx ruff@0.17.3 check custom_components
+        run: uvx ruff@0.17.3 check --isolated --select S custom_components
