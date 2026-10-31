@@ -5,6 +5,7 @@ from __future__ import annotations
 from collections.abc import Mapping
 import logging
 from typing import Any
+from urllib.parse import urlparse
 
 import aiohttp
 import voluptuous as vol
@@ -21,6 +22,12 @@ from homeassistant.const import (
 from homeassistant.core import HomeAssistant, callback
 from homeassistant.data_entry_flow import FlowResult
 from homeassistant.helpers import aiohttp_client
+from homeassistant.helpers.service_info.ssdp import (
+    ATTR_UPNP_FRIENDLY_NAME,
+    ATTR_UPNP_MODEL_NAME,
+    ATTR_UPNP_SERIAL,
+    SsdpServiceInfo,
+)
 from homeassistant.util.network import is_host_valid
 
 from . import proto
@@ -110,11 +117,12 @@ class ConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
 
     def __init__(self) -> None:
         """Initialize."""
-        self.zero_conf: zeroconf.ZeroconfServiceInfo
         self.server_id = None
         self.host: str | None = None
         # /loginContext's answer.
         self.device: dict[str, Any] = {}
+        # The discovered device's name and model, as the confirm step shows them.
+        self._discovered: dict[str, str] = {}
         self._reauth_entry: config_entries.ConfigEntry | None = None
 
     async def async_step_user(
@@ -154,8 +162,6 @@ class ConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
         self, discovery_info: zeroconf.ZeroconfServiceInfo
     ) -> FlowResult:
         """Handle zeroconf discovery."""
-        self.zero_conf = discovery_info
-
         # Check if already configured
         self.server_id = discovery_info.properties.get("serverId", "")
         # This was part of PR#54 and was incorrect the server id is simply the chip id of the ESP32 but could
@@ -169,36 +175,54 @@ class ConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
         self._abort_if_unique_id_configured(
             updates={CONF_HOST: discovery_info.host}, reload_on_update=True
         )
-        self.context.update(
-            {
-                "title_placeholders": {
-                    CONF_NAME: discovery_info.hostname,
-                    CONF_HOST: discovery_info.host,
-                    "model": discovery_info.properties.get("model", ""),
-                    "configuration_url": f"http://{discovery_info.host}",
-                },
-            }
+        return await self._confirm_discovered(
+            discovery_info.hostname, discovery_info.properties.get("model", "")
         )
-        return await self.async_step_zeroconf_confirm()
 
-    async def async_step_zeroconf_confirm(
+    async def async_step_ssdp(self, discovery_info: SsdpServiceInfo) -> FlowResult:
+        """Handle SSDP discovery, as zeroconf: a device set up moves to its address."""
+        # The serial number is ESP32- and the server id in lower case.
+        serial = discovery_info.upnp.get(ATTR_UPNP_SERIAL, "")
+        prefix, _, chip_id = serial.partition("-")
+        location = urlparse(discovery_info.ssdp_location or "")
+        if prefix != "ESP32" or not chip_id or not location.hostname:
+            return self.async_abort(reason="not_espsomfy")
+        self.server_id = chip_id.upper()
+        self.host = location.hostname
+        if location.port not in (None, 80):
+            self.host = f"{self.host}:{location.port}"
+        await self.async_set_unique_id(f"espsomfy_{self.server_id}")
+        self._abort_if_unique_id_configured(
+            updates={CONF_HOST: self.host}, reload_on_update=True
+        )
+        return await self._confirm_discovered(
+            discovery_info.upnp.get(ATTR_UPNP_FRIENDLY_NAME, self.host),
+            discovery_info.upnp.get(ATTR_UPNP_MODEL_NAME, ""),
+        )
+
+    async def _confirm_discovered(self, name: str, model: str) -> FlowResult:
+        self._discovered = {CONF_NAME: name, "model": model}
+        self.context["title_placeholders"] = {
+            **self._discovered,
+            CONF_HOST: self.host,
+            "configuration_url": f"http://{self.host}",
+        }
+        return await self.async_step_discovery_confirm()
+
+    async def async_step_discovery_confirm(
         self, user_input: dict[str, Any] | None = None
     ) -> FlowResult:
-        """Handle a flow initiated by zeroconf."""
+        """Handle a flow initiated by zeroconf or SSDP."""
         if user_input is not None:
             try:
-                await self._read_device(self.zero_conf.host)
+                await self._read_device(self.host)
             except CannotConnect:
                 return self.async_abort(reason="cannot_connect")
             return await self.async_step_credentials()
 
         return self.async_show_form(
-            step_id="zeroconf_confirm",
-            description_placeholders={
-                CONF_NAME: self.zero_conf.hostname,
-                "model": self.zero_conf.properties.get("model", ""),
-                "server_id": self.server_id,
-            },
+            step_id="discovery_confirm",
+            description_placeholders={**self._discovered, "server_id": self.server_id},
         )
 
     async def async_step_reauth(self, entry_data: Mapping[str, Any]) -> FlowResult:
