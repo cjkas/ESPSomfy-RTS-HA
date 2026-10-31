@@ -11,11 +11,13 @@ import pytest
 from pytest_homeassistant_custom_component.common import MockConfigEntry
 
 from homeassistant.config_entries import (
+    SOURCE_SSDP,
     SOURCE_USER,
     SOURCE_ZEROCONF,
     ConfigEntryState,
 )
 from homeassistant.data_entry_flow import FlowResultType
+from homeassistant.helpers.service_info.ssdp import SsdpServiceInfo
 from homeassistant.helpers.service_info.zeroconf import ZeroconfServiceInfo
 
 from custom_components.espsomfy_rts.const import DOMAIN
@@ -169,7 +171,7 @@ async def test_zeroconf_asks_for_credentials_when_secured(hass, host, device):
     result = await hass.config_entries.flow.async_init(
         DOMAIN, context={"source": SOURCE_ZEROCONF}, data=info
     )
-    assert result["step_id"] == "zeroconf_confirm"
+    assert result["step_id"] == "discovery_confirm"
     result = await hass.config_entries.flow.async_configure(result["flow_id"], {})
     assert result["step_id"] == "credentials"
     result = await hass.config_entries.flow.async_configure(
@@ -182,6 +184,65 @@ async def test_zeroconf_asks_for_credentials_when_secured(hass, host, device):
         "password": "",
         "pin": "1234",
     }
+
+
+def ssdp(location: str, serial: str = "ESP32-a1b2c3") -> SsdpServiceInfo:
+    """What SSDP finds of a device: the description its LOCATION gives."""
+    return SsdpServiceInfo(
+        ssdp_usn="uuid:C2496952-5610-47E6-A968-2FC140A1B2C3",
+        ssdp_st="urn:schemas-rstrouse-org:device:ESPSomfyRTS:1",
+        ssdp_location=location,
+        upnp={
+            "deviceType": "urn:schemas-rstrouse-org:device:ESPSomfyRTS:1",
+            "friendlyName": "espsomfy",
+            "modelName": "ESPSomfy RTS",
+            "serialNumber": serial,
+        },
+    )
+
+
+async def test_ssdp_moves_a_device_set_up_to_its_address(hass):
+    """The serial number is the server id: that entry takes the new address."""
+    entry = MockConfigEntry(
+        domain=DOMAIN, unique_id="espsomfy_A1B2C3", data={"host": "10.0.0.9"}
+    )
+    entry.add_to_hass(hass)
+    result = await hass.config_entries.flow.async_init(
+        DOMAIN,
+        context={"source": SOURCE_SSDP},
+        data=ssdp("http://10.0.0.7:80/upnp.xml"),
+    )
+    assert result["type"] is FlowResultType.ABORT
+    assert result["reason"] == "already_configured"
+    assert entry.data["host"] == "10.0.0.7"
+
+
+async def test_ssdp_offers_a_new_device(hass, host, device):
+    """A device not set up is confirmed, then added on the address found."""
+    result = await hass.config_entries.flow.async_init(
+        DOMAIN, context={"source": SOURCE_SSDP}, data=ssdp(f"http://{host}/upnp.xml")
+    )
+    assert result["step_id"] == "discovery_confirm"
+    assert result["description_placeholders"] == {
+        "name": "espsomfy",
+        "model": "ESPSomfy RTS",
+        "server_id": "A1B2C3",
+    }
+    result = await hass.config_entries.flow.async_configure(result["flow_id"], {})
+    assert result["type"] is FlowResultType.CREATE_ENTRY
+    assert result["result"].unique_id == "espsomfy_A1B2C3"
+    assert result["data"] == {"host": host, **NO_CREDENTIALS}
+
+
+async def test_ssdp_without_an_espsomfy_serial_number(hass):
+    """Another device of the type, or none named, is left alone."""
+    result = await hass.config_entries.flow.async_init(
+        DOMAIN,
+        context={"source": SOURCE_SSDP},
+        data=ssdp("http://10.0.0.7/upnp.xml", serial="C2496952"),
+    )
+    assert result["type"] is FlowResultType.ABORT
+    assert result["reason"] == "not_espsomfy"
 
 
 async def test_reauth_takes_new_credentials(hass, entry, device):
