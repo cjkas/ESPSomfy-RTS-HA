@@ -12,7 +12,7 @@ from homeassistant.components import persistent_notification
 from homeassistant.config_entries import SOURCE_REAUTH, ConfigEntryState
 from homeassistant.const import STATE_UNAVAILABLE
 from homeassistant.exceptions import HomeAssistantError
-from homeassistant.helpers import entity_registry as er
+from homeassistant.helpers import device_registry as dr, entity_registry as er
 
 from custom_components.espsomfy_rts import compat, controller as controller_module
 from custom_components.espsomfy_rts.const import DOMAIN
@@ -47,6 +47,13 @@ async def test_setup_takes_the_model_from_the_sync(hass, loaded, device):
     update = hass.states.get(entity_id(hass, "update", f"update_{UNIQUE_ID}"))
     assert update.attributes["installed_version"] == "v3.0.14"
     assert update.attributes["supported_features"] == 0
+
+
+async def test_the_device_is_made_by_cjkas(hass, loaded, device):
+    """The device names this fork as its manufacturer."""
+    entry = dr.async_get(hass).async_get_device(identifiers={(DOMAIN, UNIQUE_ID)})
+    assert entry is not None
+    assert entry.manufacturer == "cjkas"
 
 
 async def test_events_reach_the_entities(hass, loaded, device):
