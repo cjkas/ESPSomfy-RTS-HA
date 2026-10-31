@@ -5,19 +5,37 @@ on:
   pull_request:
   workflow_dispatch:
 
+permissions:
+  contents: read
+
 jobs:
   proto:
     runs-on: "ubuntu-latest"
     steps:
-      - uses: "actions/checkout@v4"
-      - uses: "astral-sh/setup-uv@v6"
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          persist-credentials: false
+      - uses: astral-sh/setup-uv@d0cc045d04ccac9d8b7881df0226f9e82c39688e # v6.8.0
       - name: Protocol 2 tests
         run: uv run --no-project --python 3.13 --with-requirements requirements_test.txt -- pytest tests/proto
 
   ha:
     runs-on: "ubuntu-latest"
     steps:
-      - uses: "actions/checkout@v4"
-      - uses: "astral-sh/setup-uv@v6"
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          persist-credentials: false
+      - uses: astral-sh/setup-uv@d0cc045d04ccac9d8b7881df0226f9e82c39688e # v6.8.0
       - name: Integration tests in Home Assistant's harness
         run: uv run --no-project --python 3.13 --with-requirements requirements_test_ha.txt -- pytest tests/ha
+
+  # ruff's bandit rules (S) only, so editors keep their own ruff settings.
+  security-lint:
+    runs-on: "ubuntu-latest"
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          persist-credentials: false
+      - uses: astral-sh/setup-uv@d0cc045d04ccac9d8b7881df0226f9e82c39688e # v6.8.0
+      - name: Security lint
+        run: uvx ruff@0.17.3 check --isolated --select S custom_components
