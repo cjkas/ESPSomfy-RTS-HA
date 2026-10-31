@@ -1,0 +1,49 @@
+name: Release
+
+# Adds espsomfy_rts.zip to each release: the integration's tracked files,
+# with a signed attestation that this workflow made it from the release's
+# commit. HACS installs from the tag's source, not from this zip; it is for
+# manual installs and for checking an install against.
+on:
+  release:
+    types: [published]
+
+permissions:
+  contents: read
+
+jobs:
+  release:
+    name: Publish release
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write       # the release's files
+      id-token: write       # Sigstore signs the attestation
+      attestations: write
+
+    steps:
+      - name: Check out code
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          persist-credentials: false
+
+      # Only the tracked files, at the zip's root: what goes into
+      # custom_components/espsomfy_rts.
+      - name: Zip the integration
+        run: |
+          mkdir dist
+          git archive --format=zip -o dist/espsomfy_rts.zip HEAD:custom_components/espsomfy_rts
+          cd dist
+          sha256sum * > SHA256SUMS
+          cat SHA256SUMS
+
+      #   gh attestation verify espsomfy_rts.zip --repo cjkas/ESPSomfy-RTS-HA
+      - name: Attest build provenance
+        uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8 # v4.2.2
+        with:
+          subject-path: dist/espsomfy_rts.zip
+
+      - name: Upload to the release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ github.event.release.tag_name }}
+        run: gh release upload "$TAG" dist/* --clobber --repo "$GITHUB_REPOSITORY"

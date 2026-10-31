@@ -792,7 +792,7 @@ class ESPSomfyAPI:
             async with self._session.get(url) as resp:
                 if resp.status == 200:
                     return True
-        except Exception:  # noqa: BLE001
+        except Exception:  # noqa: BLE001, S110
             # We don't care to do anything other than catch expections here.  If anything goes wrong there is an issue
             # with the address and we should not use it.
             pass
