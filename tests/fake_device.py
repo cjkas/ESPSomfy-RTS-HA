@@ -12,6 +12,8 @@ HTTP API on port 8081 and the socket on 8080 did.
 
 from __future__ import annotations
 
+from collections.abc import AsyncIterator
+from contextlib import asynccontextmanager
 import json
 from pathlib import Path
 from typing import Any
@@ -123,6 +125,18 @@ class FakeDevice:
         app.router.add_put("/{route}", self._put)
         app.router.add_get("/legacy", self._legacy_ws)
         return app
+
+    @asynccontextmanager
+    async def serve(self) -> AsyncIterator[str]:
+        """The app served on a free port of localhost, by its address."""
+        runner = web.AppRunner(self.app(), shutdown_timeout=0.1)
+        await runner.setup()
+        await web.TCPSite(runner, "127.0.0.1", 0).start()
+        try:
+            yield f"127.0.0.1:{runner.addresses[0][1]}"
+        finally:
+            await self.close_sockets()
+            await runner.cleanup()
 
     async def send(self, type_name: str, **fields: Any) -> None:
         """Send an event to every client."""

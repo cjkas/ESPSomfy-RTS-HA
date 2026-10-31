@@ -34,7 +34,7 @@
         "title": "ESPSomfy RTS Konfiguration",
         "description": "Geben Sie Ihre Daten ein."
       },
-      "zeroconf_confirm": {
+      "discovery_confirm": {
         "data": {
           "host": "ESPSomfy RTS Hostname oder IP",
           "username": "Name",

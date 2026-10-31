@@ -5,13 +5,19 @@ from __future__ import annotations
 from ipaddress import ip_address
 import socket
 
-from harness import UNIQUE_ID
+from harness import UNIQUE_ID, until
 from fake_device import HOSTNAME, MODE_PASSWORD, MODE_PIN, SERVER_ID
 import pytest
 from pytest_homeassistant_custom_component.common import MockConfigEntry
 
-from homeassistant.config_entries import SOURCE_USER, SOURCE_ZEROCONF
+from homeassistant.config_entries import (
+    SOURCE_SSDP,
+    SOURCE_USER,
+    SOURCE_ZEROCONF,
+    ConfigEntryState,
+)
 from homeassistant.data_entry_flow import FlowResultType
+from homeassistant.helpers.service_info.ssdp import SsdpServiceInfo
 from homeassistant.helpers.service_info.zeroconf import ZeroconfServiceInfo
 
 from custom_components.espsomfy_rts.const import DOMAIN
@@ -165,7 +171,7 @@ async def test_zeroconf_asks_for_credentials_when_secured(hass, host, device):
     result = await hass.config_entries.flow.async_init(
         DOMAIN, context={"source": SOURCE_ZEROCONF}, data=info
     )
-    assert result["step_id"] == "zeroconf_confirm"
+    assert result["step_id"] == "discovery_confirm"
     result = await hass.config_entries.flow.async_configure(result["flow_id"], {})
     assert result["step_id"] == "credentials"
     result = await hass.config_entries.flow.async_configure(
@@ -178,6 +184,65 @@ async def test_zeroconf_asks_for_credentials_when_secured(hass, host, device):
         "password": "",
         "pin": "1234",
     }
+
+
+def ssdp(location: str, serial: str = "ESP32-a1b2c3") -> SsdpServiceInfo:
+    """What SSDP finds of a device: the description its LOCATION gives."""
+    return SsdpServiceInfo(
+        ssdp_usn="uuid:C2496952-5610-47E6-A968-2FC140A1B2C3",
+        ssdp_st="urn:schemas-rstrouse-org:device:ESPSomfyRTS:1",
+        ssdp_location=location,
+        upnp={
+            "deviceType": "urn:schemas-rstrouse-org:device:ESPSomfyRTS:1",
+            "friendlyName": "espsomfy",
+            "modelName": "ESPSomfy RTS",
+            "serialNumber": serial,
+        },
+    )
+
+
+async def test_ssdp_moves_a_device_set_up_to_its_address(hass):
+    """The serial number is the server id: that entry takes the new address."""
+    entry = MockConfigEntry(
+        domain=DOMAIN, unique_id="espsomfy_A1B2C3", data={"host": "10.0.0.9"}
+    )
+    entry.add_to_hass(hass)
+    result = await hass.config_entries.flow.async_init(
+        DOMAIN,
+        context={"source": SOURCE_SSDP},
+        data=ssdp("http://10.0.0.7:80/upnp.xml"),
+    )
+    assert result["type"] is FlowResultType.ABORT
+    assert result["reason"] == "already_configured"
+    assert entry.data["host"] == "10.0.0.7"
+
+
+async def test_ssdp_offers_a_new_device(hass, host, device):
+    """A device not set up is confirmed, then added on the address found."""
+    result = await hass.config_entries.flow.async_init(
+        DOMAIN, context={"source": SOURCE_SSDP}, data=ssdp(f"http://{host}/upnp.xml")
+    )
+    assert result["step_id"] == "discovery_confirm"
+    assert result["description_placeholders"] == {
+        "name": "espsomfy",
+        "model": "ESPSomfy RTS",
+        "server_id": "A1B2C3",
+    }
+    result = await hass.config_entries.flow.async_configure(result["flow_id"], {})
+    assert result["type"] is FlowResultType.CREATE_ENTRY
+    assert result["result"].unique_id == "espsomfy_A1B2C3"
+    assert result["data"] == {"host": host, **NO_CREDENTIALS}
+
+
+async def test_ssdp_without_an_espsomfy_serial_number(hass):
+    """Another device of the type, or none named, is left alone."""
+    result = await hass.config_entries.flow.async_init(
+        DOMAIN,
+        context={"source": SOURCE_SSDP},
+        data=ssdp("http://10.0.0.7/upnp.xml", serial="C2496952"),
+    )
+    assert result["type"] is FlowResultType.ABORT
+    assert result["reason"] == "not_espsomfy"
 
 
 async def test_reauth_takes_new_credentials(hass, entry, device):
@@ -219,3 +284,36 @@ async def test_options_check_the_new_credentials(hass, entry, device):
     assert result["type"] is FlowResultType.CREATE_ENTRY
     assert entry.data["pin"] == "1234"
     assert entry.title == HOSTNAME
+
+
+@pytest.fixture
+async def moved(device, socket_enabled):
+    """The same device on a second port, as if it had moved; outlasts loaded."""
+    async with device.serve() as address:
+        yield address
+
+
+async def test_options_with_a_new_address_connect_to_it(hass, moved, loaded, device):
+    """The entry is set up again on the address the options give."""
+    result = await hass.config_entries.options.async_init(loaded.entry_id)
+    result = await hass.config_entries.options.async_configure(
+        result["flow_id"], {"host": moved}
+    )
+    await hass.async_block_till_done()
+    assert result["type"] is FlowResultType.CREATE_ENTRY
+    assert hass.data[DOMAIN][loaded.entry_id].api.data["host"] == moved
+    assert loaded.state is ConfigEntryState.LOADED
+    assert len(device.schema_params) == 2
+    # The socket to the old address closed.
+    await until(lambda: len(device.sockets) == 1)
+
+
+async def test_options_unchanged_keep_the_connection(hass, loaded, device):
+    """Saving the options as they were sets nothing up again."""
+    result = await hass.config_entries.options.async_init(loaded.entry_id)
+    result = await hass.config_entries.options.async_configure(
+        result["flow_id"], {"host": loaded.data["host"]}
+    )
+    await hass.async_block_till_done()
+    assert result["type"] is FlowResultType.CREATE_ENTRY
+    assert len(device.schema_params) == 1

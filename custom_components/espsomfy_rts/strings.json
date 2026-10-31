@@ -4,6 +4,7 @@
       "no_devices_found": "No devices found on the network",
       "single_instance_allowed": "Already configured. Only a single configuration possible.",
       "already_configured": "This device is already configured",
+      "not_espsomfy": "The device did not give an ESPSomfy RTS serial number",
       "cannot_connect": "Failed to connect",
       "reauth_successful": "The device accepted the new credentials"
     },
@@ -25,7 +26,7 @@
         "description": "The address of the ESPSomfy RTS device",
         "title": "Configure ESPSomfy RTS"
       },
-      "zeroconf_confirm": {
+      "discovery_confirm": {
         "description": "Do you want to add {model} with server id {server_id} to Home Assistant?",
         "title": "ESPSomfy RTS Discovered"
       },

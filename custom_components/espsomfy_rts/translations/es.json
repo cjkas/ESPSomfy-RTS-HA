@@ -34,7 +34,7 @@
         "description": "Proporciona las opciones de seguridad configuradas para tu dispositivo",
         "title": "Configura ESPSomfy RTS"
       },
-      "zeroconf_confirm": {
+      "discovery_confirm": {
         "data": {
           "host": "Dirección de Host para el dispositivo ESPSomfy RTS",
           "username": "Usuario",

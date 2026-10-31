@@ -9,7 +9,6 @@ from __future__ import annotations
 from pathlib import Path
 import sys
 
-from aiohttp import web
 import pytest
 
 ROOT = Path(__file__).parents[2]
@@ -41,14 +40,8 @@ def device() -> FakeDevice:
 @pytest.fixture
 async def host(device: FakeDevice, socket_enabled):
     """The fake device's address, served for the test."""
-    runner = web.AppRunner(device.app(), shutdown_timeout=0.1)
-    await runner.setup()
-    site = web.TCPSite(runner, "127.0.0.1", 0)
-    await site.start()
-    port = runner.addresses[0][1]
-    yield f"127.0.0.1:{port}"
-    await device.close_sockets()
-    await runner.cleanup()
+    async with device.serve() as address:
+        yield address
 
 
 @pytest.fixture
