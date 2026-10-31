@@ -303,14 +303,17 @@ class ESPSomfyOptionsFlowHandler(config_entries.OptionsFlow):
                 else:
                     data = {CONF_HOST: host, **creds}
                     title = _title(device, host)
+                    changed = data != dict(self._config_entry.data)
                     # Update config entry with data from user input
                     self.hass.config_entries.async_update_entry(
                         self._config_entry, title=title, data=data
                     )
                     # The socket is still on the old address and credentials.
-                    self.hass.config_entries.async_schedule_reload(
-                        self._config_entry.entry_id
-                    )
+                    # Here, not in an update listener: setup updates the title.
+                    if changed:
+                        self.hass.config_entries.async_schedule_reload(
+                            self._config_entry.entry_id
+                        )
                     return self.async_create_entry(title=title, data=data)
 
         return self.async_show_form(

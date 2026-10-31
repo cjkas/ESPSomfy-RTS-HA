@@ -5,8 +5,7 @@ from __future__ import annotations
 from ipaddress import ip_address
 import socket
 
-from aiohttp import web
-from harness import UNIQUE_ID
+from harness import UNIQUE_ID, until
 from fake_device import HOSTNAME, MODE_PASSWORD, MODE_PIN, SERVER_ID
 import pytest
 from pytest_homeassistant_custom_component.common import MockConfigEntry
@@ -226,25 +225,34 @@ async def test_options_check_the_new_credentials(hass, entry, device):
     assert entry.title == HOSTNAME
 
 
-async def test_options_with_a_new_address_connect_to_it(hass, loaded, device):
+@pytest.fixture
+async def moved(device, socket_enabled):
+    """The same device on a second port, as if it had moved; outlasts loaded."""
+    async with device.serve() as address:
+        yield address
+
+
+async def test_options_with_a_new_address_connect_to_it(hass, moved, loaded, device):
     """The entry is set up again on the address the options give."""
-    # The same device, served on a second port as if it had moved.
-    runner = web.AppRunner(device.app(), shutdown_timeout=0.1)
-    await runner.setup()
-    await web.TCPSite(runner, "127.0.0.1", 0).start()
-    moved = f"127.0.0.1:{runner.addresses[0][1]}"
-    try:
-        result = await hass.config_entries.options.async_init(loaded.entry_id)
-        result = await hass.config_entries.options.async_configure(
-            result["flow_id"], {"host": moved}
-        )
-        await hass.async_block_till_done()
-        assert result["type"] is FlowResultType.CREATE_ENTRY
-        assert hass.data[DOMAIN][loaded.entry_id].api.data["host"] == moved
-        assert loaded.state is ConfigEntryState.LOADED
-        # Connected again, not left on the socket to the old address.
-        assert len(device.schema_params) == 2
-    finally:
-        await hass.config_entries.async_unload(loaded.entry_id)
-        await hass.async_block_till_done()
-        await runner.cleanup()
+    result = await hass.config_entries.options.async_init(loaded.entry_id)
+    result = await hass.config_entries.options.async_configure(
+        result["flow_id"], {"host": moved}
+    )
+    await hass.async_block_till_done()
+    assert result["type"] is FlowResultType.CREATE_ENTRY
+    assert hass.data[DOMAIN][loaded.entry_id].api.data["host"] == moved
+    assert loaded.state is ConfigEntryState.LOADED
+    assert len(device.schema_params) == 2
+    # The socket to the old address closed.
+    await until(lambda: len(device.sockets) == 1)
+
+
+async def test_options_unchanged_keep_the_connection(hass, loaded, device):
+    """Saving the options as they were sets nothing up again."""
+    result = await hass.config_entries.options.async_init(loaded.entry_id)
+    result = await hass.config_entries.options.async_configure(
+        result["flow_id"], {"host": loaded.data["host"]}
+    )
+    await hass.async_block_till_done()
+    assert result["type"] is FlowResultType.CREATE_ENTRY
+    assert len(device.schema_params) == 1
