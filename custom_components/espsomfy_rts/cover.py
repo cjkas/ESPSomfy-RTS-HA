@@ -323,6 +323,16 @@ class ESPSomfyGroup(CoverGroup, ESPSomfyEntity):
         # print(f"Stopping Cover id#{self._shade_id}")
         await self._controller.api.stop_group(self._group_id)
 
+    async def async_set_cover_position(self, **kwargs: Any) -> None:
+        """Use the native group remote for HomeKit's endpoint positions."""
+        position = int(kwargs[ATTR_POSITION])
+        if position == 100:
+            await self.async_open_cover(**kwargs)
+        elif position == 0:
+            await self.async_close_cover(**kwargs)
+        else:
+            await super().async_set_cover_position(**kwargs)
+
     async def async_send_command(self, **kwargs: Any) -> None:
         """Send raw command from SVC."""
         cmd = {"groupId": self._group_id, "command": kwargs[ATTR_COMMAND]}
