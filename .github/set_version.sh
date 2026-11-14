@@ -42,11 +42,14 @@ sed -i "s/\"version\": \"[^\"]*\"/\"version\": \"${VERSION}\"/" "$DIR/manifest.j
 sed -i "s/^VERSION = \"v[^\"]*\"/VERSION = \"v${VERSION}\"/" "$DIR/const.py"
 
 # sed succeeds when nothing matches, so check each file got the version.
+# const.py's must start the line, as the sed's does:
+# INTEGRATION_VERSION = "v3.0.4" contains it but isn't it.
 check() {
-  if ! grep -qF -- "$2" "$1"; then
-    echo "$1 doesn't have $2: its version string changed shape" >&2
+  if ! grep -q -- "$2" "$1"; then
+    echo "$1 doesn't have $3: its version string changed shape" >&2
     exit 1
   fi
 }
-check "$DIR/manifest.json" "\"version\": \"${VERSION}\""
-check "$DIR/const.py" "VERSION = \"v${VERSION}\""
+version_re="${VERSION//./\\.}"
+check "$DIR/manifest.json" "\"version\": \"${version_re}\"" "\"version\": \"${VERSION}\""
+check "$DIR/const.py" "^VERSION = \"v${version_re}\"" "VERSION = \"v${VERSION}\""

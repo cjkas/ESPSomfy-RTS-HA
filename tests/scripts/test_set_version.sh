@@ -75,13 +75,18 @@ fresh
 if run --if-newer v3.0; then fail "--if-newer accepted v3.0"; fi
 
 # A file whose version string changed shape fails loudly instead of
-# silently keeping the old version.
-fresh
-sed -i 's/^VERSION = /INTEGRATION_VERSION = /' "$DIR/const.py"
-if run v3.0.4; then fail "passed with no VERSION line"; fi
-fresh
-sed -i 's/"version": /"integration_version": /' "$DIR/manifest.json"
-if run v3.0.4; then fail "passed with no manifest version"; fi
+# silently keeping the old version. Both with another version and with the
+# one the files already have, which the renamed line still contains.
+current="$(sed -n 's/^VERSION = "\(v[^"]*\)".*/\1/p' "$REPO/$DIR/const.py")"
+[[ -n "$current" ]] || fail "no VERSION line in the repo's const.py"
+for tag in v9.9.9 "$current"; do
+  fresh
+  sed -i 's/^VERSION = /INTEGRATION_VERSION = /' "$DIR/const.py"
+  if run "$tag"; then fail "$tag: passed with no VERSION line"; fi
+  fresh
+  sed -i 's/"version": /"integration_version": /' "$DIR/manifest.json"
+  if run "$tag"; then fail "$tag: passed with no manifest version"; fi
+done
 
 if ((failures)); then
   echo "$failures failure(s)"
